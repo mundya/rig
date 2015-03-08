@@ -281,12 +281,25 @@ class MachineController(ContextMixin):
         # Look up the struct and field
         field = self.structs[struct_name][field_name]
 
-        address = self.structs[struct_name].base + field.offset
+        # If the struct is VCPU then first retrieve the base address by
+        # requesting it from the sv struct, otherwise just retrieve it directly
+        # from the struct definition.
+        if struct_name == b"vcpu":
+            address = self.read_struct_field(b"sv", b"vcpu_base", x, y)
+            address += self.structs[struct_name].size * p
+        else:
+            address = self.structs[struct_name].base
+
+        address += field.offset
         pack_chars = field.length * field.pack_chars  # NOTE Python 2 and 3 fix
         length = struct.calcsize(pack_chars)
 
         # Perform the read
-        data = self.read(address, length, x, y, p)
+        # If the struct is VCPU or SV then we can just read from p=0
+        if struct_name in [b"sv", b"vcpu"]:
+            data = self.read(address, length, x, y)
+        else:
+            data = self.read(address, length, x, y, p)
 
         # Unpack the data
         unpacked = struct.unpack(pack_chars, data)

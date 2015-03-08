@@ -665,7 +665,6 @@ class TestMachineController(object):
         "which_struct, field, expected",
         [(b"sv", b"dbg_addr", 0),
          (b"sv", b"status_map", (0, )*20),
-         (b"vcpu", b"sw_count", 0),
          ])
     def test_read_struct_field(self, x, y, p, which_struct, field, expected):
         # Open the struct file
@@ -692,6 +691,43 @@ class TestMachineController(object):
             structs[which_struct].base + structs[which_struct][field].offset,
             struct.calcsize(structs[which_struct][field].pack_chars),
             x, y, p
+        )
+
+    @pytest.mark.parametrize("x, y", [(0, 1), (1, 3)])
+    @pytest.mark.parametrize("p", [0, 1, 2, 3, 4])
+    @pytest.mark.parametrize("field_name", [b"cpu_flags", b"sw_count"])
+    @pytest.mark.parametrize("vcpu_base", [0x67002233, 0x22223333])
+    def test_read_struct_field_vcpu(self, x, y, p, field_name, vcpu_base):
+        # Open the struct file
+        struct_data = pkg_resources.resource_string("rig", "boot/sark.struct")
+        structs = struct_file.read_struct_file(struct_data)
+
+        # Create the mock read method
+        vcpu_field = structs[b"sv"][b"vcpu_base"]
+
+        def mock_read(address, n_bytes, x, y, p=0):
+            # If trying to get the VCPU base then return it
+            if address == structs[b"sv"].base + vcpu_field.offset:
+                return struct.pack(vcpu_field.pack_chars, vcpu_base)
+
+            # Otherwise just return some appropriate value
+            return b"\x00" * n_bytes
+
+        # Create the mock controller
+        cn = MachineController("localhost")
+        cn.structs = structs
+        cn.read = mock.Mock()
+        cn.read.side_effect = mock_read
+
+        # Read the struct value
+        cn.read_struct_field(b"vcpu", field_name, x, y, p)
+
+        # Check the reads were performed
+        req_field = structs[b"vcpu"][field_name]
+        n_bytes = struct.calcsize(req_field.pack_chars)
+        cn.read.assert_called_with(
+            vcpu_base + p*structs[b"vcpu"].size + req_field.offset,
+            n_bytes, x, y
         )
 
     @pytest.mark.parametrize("n_args", [0, 3])

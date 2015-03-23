@@ -3,25 +3,31 @@
 import collections
 import os
 import six
-from six import iteritems
+from six import iteritems, itervalues, next
 import socket
 import struct
-import time
 import pkg_resources
+
+import trollius
+from trollius import From, Return
 
 from . import struct_file
 from .consts import SCPCommands, DataType, NNCommands, NNConstants, \
     AppFlags, LEDAction
 from . import boot, consts, regions
-from .scp_connection import SCPConnection
+from .scp_protocol import SCPProtocol
 
 from rig import routing_table
 from rig.machine import Cores, SDRAM, SRAM, Links, Machine
 
+from rig.geometry import spinn5_eth_coords, spinn5_local_eth_coord
+
 from rig.utils.contexts import ContextMixin, Required
+from rig.utils.look_blocking import LookBlockingMixin
+from rig.utils.gather_fail import gather_fail
 
 
-class MachineController(ContextMixin):
+class MachineController(ContextMixin, LookBlockingMixin):
     """A high-level interface for controlling a SpiNNaker system.
 
     This class is essentially a wrapper around key functions provided by the
@@ -59,16 +65,23 @@ class MachineController(ContextMixin):
             core_one_status = cm.get_processor_status(1)
 
     """
-    def __init__(self, initial_host, scp_port=consts.SCP_PORT,
-                 boot_port=consts.BOOT_PORT, n_tries=5, timeout=0.5,
-                 structs=None, initial_context={"app_id": 66}):
+    def __init__(self, zero_zero_host=None, scp_port=consts.SCP_PORT,
+                 boot_port=consts.BOOT_PORT, n_tries=5, timeout=1.5,
+                 structs=None, initial_context={"app_id": 66}, loop=None):
         """Create a new controller for a SpiNNaker machine.
 
         Parameters
         ----------
-        initial_host : string
-            Hostname or IP address of the SpiNNaker chip to connect to. If the
-            board has not yet been booted, this will become chip (0, 0).
+        zero_zero_host : string
+            Hostname or IP address of the SpiNNaker chip at (0, 0) or None to
+            postpone supplying a hostname or opening a socket until later using
+            :py:meth:`.connect_to_hosts`.
+
+            .. warning::
+                Setting this argument causes this constructor to block until a
+                socket has been set up for this hostname. Users who wish to
+                avoid blocking should leave this argument as None and make a
+                non-blocking call to :py:meth:`.connect_to_hosts` instead.
         scp_port : int
             Port number for SCP connections.
         boot_port : int
@@ -86,18 +99,29 @@ class MachineController(ContextMixin):
         initial_context : `{argument: value}`
             Default argument values to pass to methods in this class. By
             default this just specifies a default App-ID.
+        loop : :py:class:`asyncio.BaseEventLoop` or None
+            If you're using BMPController in an asynchronous fashion, this
+            argument can be used to specify the event loop to use. If
+            unspecified, the default trollius event loop will be used.
         """
         # Initialise the context stack
         ContextMixin.__init__(self, initial_context)
 
+        # Setup event loop
+        LookBlockingMixin.__init__(self, loop)
+
         # Store the initial parameters
-        self.initial_host = initial_host
         self.scp_port = scp_port
         self.boot_port = boot_port
         self.n_tries = n_tries
         self.timeout = timeout
         self._nn_id = 0  # ID for nearest neighbour packets
         self._scp_data_length = None
+
+        # Internally remember the dimensions of the system (to facilitate
+        # looking up the best connection for a chip). This internal attribute
+        # is set whenever get_dimensions is called.
+        self._dimensions = None
 
         # Load default structs if none provided
         self.structs = structs
@@ -107,9 +131,200 @@ class MachineController(ContextMixin):
             self.structs = struct_file.read_struct_file(struct_data)
 
         # Create the initial connection
-        self.connections = [
-            SCPConnection(initial_host, scp_port, n_tries, timeout)
+        self.connections = {}
+        if zero_zero_host is not None:
+            self.connect_to_hosts({(0, 0): zero_zero_host})
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
+    def connect_to_hosts(self, hosts):
+        """Create connections to the supplied set of hosts.
+
+        When possible, commands are sent to the Ethernet connection on the same
+        board as the target chip.
+
+        Unless using this method to specify the hostname of (0, 0) in a
+        non-blocking manner (instead of using the `zero_zero_host` argument to
+        :py:meth:`.__init__`), most users should use
+        :py:meth:`.discover_connections` to connect to automatically
+        use all available Ethernet connections to the machine.
+
+        .. note::
+            This function has an all-or-nothing behaviour: if any connection
+            cannot be made, all already-successful connections will be closed
+            and further connection attempts cancelled.
+
+        .. warning::
+            If multiple Ethernet connections are added, only (0, 0) will be
+            used until :py:meth:`.get_dimensions` is called. This is because
+            the system's dimensions must be known in order to work out which
+            Ethernet connected chip is most appropriate.
+
+            MachineController assumes that if multiple Ethernet connections are
+            used, the connected nodes are arranged in a system made up of
+            SpiNN-5 boards. As a result, adding a host which isn't at a
+            coordinate occupied by a SpiNN-5 board's Ethernet connected chip
+            this call will fail with a :py:exc:`NotImplementedError`.
+
+        .. warning::
+            If a connection already exists for one of the coordinates/hosts
+            supplied, the behaviour of this method is undefined.
+
+        Parameters
+        ----------
+        hosts : {coord: hostname, ...}
+            The a mapping from (x, y) chip coordinates to hostname/IP.
+        """
+        # Check all coordinates are spinn-5 ethernet connected locations
+        for coord in hosts:
+            # Assume that the system is large enough for the specified
+            # cooordinates
+            x, y = coord
+            w = ((x // 12) + 1) * 12
+            h = ((y // 12) + 1) * 12
+            if spinn5_local_eth_coord(x, y, w, h) != coord:  # pragma: no cover
+                raise NotImplementedError(
+                    "Non-SpiNN-5 connections unsupported: chip ({}, {}) is "
+                    "not an ethernet connected chip in a system made up of "
+                    "SpiNN-5 boards.".format(x, y))
+
+        # Open connections to all boards in parallel (enforcing the maximum
+        # number of outstanding connections to one since BMPs do not handle
+        # multiple outstanding connections correctly).
+        connection_requests = [
+            self.loop.create_datagram_endpoint(
+                lambda: SCPProtocol(loop=self.loop,
+                                    max_outstanding=1,
+                                    n_tries=self.n_tries,
+                                    timeout=self.timeout),
+                remote_addr=(remote_addr, self.scp_port),
+                family=socket.AF_INET)
+            for remote_addr in itervalues(hosts)
         ]
+
+        # Ensure all connections were successful
+        responses = yield From(trollius.gather(*connection_requests,
+                                               loop=self.loop,
+                                               return_exceptions=True))
+
+        exc = None
+        connections = {}
+        for coord, response in zip(hosts, responses):
+            if isinstance(response, Exception) and exc is None:
+                # Record the first exception
+                exc = response
+            else:
+                # Keep a reference to the protocol
+                connections[coord] = response[1]
+
+        # If anything failed, kill all the connections and re-raise the
+        # exception, otherwise add the protocols to the set of connections
+        if exc is None:
+            self.connections.update(connections)
+        else:
+            for protocol in itervalues(connections):
+                protocol.close()
+            raise exc
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
+    def discover_connections(self):
+        """Attempt to discover and use all available connections to a machine.
+
+        After calling this method, MachineController will attempt to use a
+        connection local to the destinations of commands. Additionally,
+        multiple connections may be used simultaneously when possible.
+
+        .. note::
+            A connection to chip (0, 0) must already be established and the
+            system must be booted for this command to succeed.
+
+        .. note::
+            At present this method only discovers Ethernet connections in
+            systems of SpiNN-5 boards.
+
+        Returns
+        -------
+        int
+            The number of new connections established.
+        """
+        w, h = yield From(self.get_dimensions(async=True))
+
+        # Get the set of live chips so we don't bother using Ethernet connected
+        # chips which are dead or isolated from the network.
+        p2p_tables = yield From(self.get_p2p_routing_table(0, 0, async=True))
+        dead_chips = set(coord for (coord, route) in iteritems(p2p_tables)
+                         if route == consts.P2PTableEntry.none)
+
+        # Check which of the potentially Ethernet connected chips have live
+        # Ethernet connections.
+        eth_up_cmds = []
+        for x, y in spinn5_eth_coords(w, h):
+            if (x, y) not in dead_chips:
+                eth_up_cmds.append(
+                    self.read_struct_field("sv", "eth_up", x=x, y=y,
+                                           async=True))
+        eth_ups = yield From(gather_fail(*eth_up_cmds, loop=self.loop))
+
+        # Get IPs of the Ethernet connections which are up
+        xys = []
+        ip_addr_cmds = []
+        eth_up_iter = iter(eth_ups)
+        for x, y in spinn5_eth_coords(w, h):
+            if (x, y) not in dead_chips and next(eth_up_iter):
+                xys.append((x, y))
+                ip_addr_cmds.append(
+                    self.read_struct_field("sv", "ip_addr", x=x, y=y,
+                                           async=True))
+        ip_addrs = yield From(gather_fail(*ip_addr_cmds, loop=self.loop))
+
+        # Build a dictionary {coord: ip_addr, ...} of IP addresses of Ethernet
+        # connected chips.
+        hosts = {}
+        for (x, y), eth_up, ip_addr in zip(xys, eth_ups, ip_addrs):
+            if eth_up:
+                # Convert IP addresses into string format
+                hosts[(x, y)] = ".".join(str((ip_addr >> (i * 8)) & 0xFF)
+                                         for i in range(4))
+
+        # Strip out connections which are already present
+        for coord in self.connections:
+            hosts.pop(coord, None)
+
+        # Attempt to open connections to each
+        connect_cmds = []
+        for coord, host in iteritems(hosts):
+            connect_cmds.append(
+                self.connect_to_hosts({coord: host}, async=True))
+        connect_results = yield From(trollius.gather(
+            *connect_cmds, loop=self.loop, return_exceptions=True))
+        bad_hosts = []
+        for (coord, host), connect_result in zip(iteritems(hosts),
+                                                 connect_results):
+            if isinstance(connect_result, Exception):
+                bad_hosts.append(coord)
+        for bad_host in bad_hosts:
+            hosts.pop(bad_host, None)
+
+        # Make sure we can communicate via each new connection
+        test_cmds = []
+        for coord, host in iteritems(hosts):
+            test_cmds.append(
+                self.get_software_version(coord[0], coord[1], async=True))
+        test_results = yield From(trollius.gather(
+            *test_cmds, loop=self.loop, return_exceptions=True))
+        bad_hosts = []
+        for (coord, host), test_result in zip(iteritems(hosts), test_results):
+            if isinstance(test_result, Exception):
+                bad_hosts.append(coord)
+
+        # Close any connections which turned out bad
+        for bad_host in bad_hosts:
+            hosts.pop(bad_host, None)
+            self.connections.pop(bad_host).close()
+
+        # Return number of new, verified connections
+        raise Return(len(hosts))
 
     def __call__(self, **context_args):
         """For use with `with`: set default argument values.
@@ -121,28 +336,33 @@ class MachineController(ContextMixin):
         """
         return self.get_new_context(**context_args)
 
-    @property
-    def scp_data_length(self):
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
+    def get_scp_data_length(self):
         """The maximum SCP data field length supported by the machine
         (bytes).
         """
         # If not known, query the machine
         if self._scp_data_length is None:
-            data = self.get_software_version(0, 0)
+            data = yield From(self.get_software_version(0, 0, async=True))
             self._scp_data_length = data.buffer_size
-        return self._scp_data_length
+        raise Return(self._scp_data_length)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_named_contextual_arguments(
         x=Required, y=Required, p=Required)
     def send_scp(self, *args, **kwargs):
         """Transmit an SCP Packet and return the response.
 
         This function is a thin wrapper around
-        :py:meth:`~rig.machine_control.scp_connection.SCPConnection`.
+        :py:meth:`~rig.machine_control.scp_protocol.SCPProtocol.send_scp`.
 
-        Future versions of this command will automatically choose the most
-        appropriate connection to use for machines with more than one Ethernet
-        connection.
+        .. note::
+            At present, this method returns the Ethernet connection to the
+            board the chip resides on. If there is no connection to this chip,
+            (0, 0) is used instead. Future versions of this method may be more
+            intelligent.
 
         Parameters
         ----------
@@ -157,8 +377,12 @@ class MachineController(ContextMixin):
         x = kwargs.pop("x")
         y = kwargs.pop("y")
         p = kwargs.pop("p")
-        return self._send_scp(x, y, p, *args, **kwargs)
 
+        # Note: returns a coroutine
+        return self._send_scp(x, y, p, *args, async=True, **kwargs)
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _send_scp(self, x, y, p, *args, **kwargs):
         """Determine the best connection to use to send an SCP packet and use
         it to transmit.
@@ -167,19 +391,33 @@ class MachineController(ContextMixin):
         has positional arguments for x, y and p.
 
         See the arguments for
-        :py:meth:`~rig.machine_control.scp_connection.SCPConnection` for
+        :py:meth:`~rig.machine_control.scp_protocol.SCPProtocol.send_scp` for
         details.
+
+        .. note::
+            At present, this method returns the Ethernet connection to the
+            board the chip resides on. If there is no connection to this chip,
+            (0, 0) is used instead. Future versions of this method may be more
+            intelligent.
         """
-        # Determine the size of packet we expect in return, this is usually the
-        # size that we are informed we should expect by SCAMP/SARK or else is
-        # the default.
-        if self._scp_data_length is None:
-            length = consts.SCP_SVER_RECEIVE_LENGTH_MAX
-        else:
-            length = self._scp_data_length
+        # Attempt to select the connection to the board on which the
+        # destination resides. This is not possible if the system's dimensions
+        # are not known (i.e. nobody has called get_dimensions).
+        connection = None
+        if self._dimensions is not None:
+            w, h = self._dimensions
+            connected_chip = spinn5_local_eth_coord(x, y, w, h)
+            connection = self.connections.get(connected_chip, None)
 
-        return self.connections[0].send_scp(length, x, y, p, *args, **kwargs)
+        # Fall-back on using (0, 0)
+        if connection is None:
+            connection = self.connections[(0, 0)]
 
+        # Note: returns a coroutine
+        return connection.send_scp(x, y, p, *args, **kwargs)
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def boot(self, width, height, **boot_kwargs):
         """Boot a SpiNNaker machine of the given size.
 
@@ -228,10 +466,19 @@ class MachineController(ContextMixin):
         enabled.
         """
         boot_kwargs.setdefault("boot_port", self.boot_port)
-        self.structs = boot.boot(self.initial_host, width=width, height=height,
-                                 **boot_kwargs)
+
+        assert (0, 0) in self.connections, \
+            "A connection to chip (0, 0) must be established before booting."
+        scp_transport = self.connections[(0, 0)].transport
+        hostname = scp_transport.get_extra_info("peername")[0]
+
+        self.structs = yield From(boot.boot(hostname,
+                                            width=width, height=height,
+                                            loop=self.loop, **boot_kwargs))
         assert len(self.structs) > 0
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_software_version(self, x=Required, y=Required, processor=0):
         """Get the software version for a given SpiNNaker core.
@@ -241,7 +488,8 @@ class MachineController(ContextMixin):
         :py:class:`.CoreInfo`
             Information about the software running on a core.
         """
-        sver = self._send_scp(x, y, processor, SCPCommands.sver)
+        sver = yield From(self._send_scp(x, y, processor, SCPCommands.sver,
+                                         async=True))
 
         # Format the result
         # arg1 => p2p address, physical cpu, virtual cpu
@@ -254,9 +502,11 @@ class MachineController(ContextMixin):
         version = (sver.arg2 >> 16) / 100.
         buffer_size = (sver.arg2 & 0xffff)
 
-        return CoreInfo(p2p_address, pcpu, vcpu, version, buffer_size,
-                        sver.arg3, sver.data.decode("utf-8"))
+        raise Return(CoreInfo(p2p_address, pcpu, vcpu, version, buffer_size,
+                              sver.arg3, sver.data.decode("utf-8")))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def write(self, address, data, x=Required, y=Required, p=0):
         """Write a bytestring to an address in memory.
@@ -277,16 +527,23 @@ class MachineController(ContextMixin):
             Data to write into memory. Writes are automatically broken into a
             sequence of SCP write commands.
         """
-        # While there is still data perform a write: get the block to write
-        # this time around, determine the data type, perform the write and
-        # increment the address
+        scp_data_length = yield From(self.get_scp_data_length(async=True))
+
+        # Queue up all required SCP packets to perform the write...
+        writes = []
         while len(data) > 0:
-            block, data = (data[:self.scp_data_length],
-                           data[self.scp_data_length:])
+            block, data = (data[:scp_data_length],
+                           data[scp_data_length:])
             dtype = address_length_dtype[(address % 4, len(block) % 4)]
-            self._write(x, y, p, address, block, dtype)
+            writes.append(self._write(x, y, p, address, block, dtype,
+                                      async=True))
             address += len(block)
 
+        # Wait for the writes to complete
+        yield From(gather_fail(*writes, loop=self.loop))
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _write(self, x, y, p, address, data, data_type=DataType.byte):
         """Write an SCP command's worth of data to an address in memory.
 
@@ -304,9 +561,13 @@ class MachineController(ContextMixin):
             The size of the data to write into memory.
         """
         length_bytes = len(data)
-        self._send_scp(x, y, p, SCPCommands.write, address, length_bytes,
-                       int(data_type), data, expected_args=0)
+        # Note: returns coroutine
+        return self._send_scp(x, y, p, SCPCommands.write, address,
+                              length_bytes, int(data_type), data,
+                              expected_args=0, async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def read(self, address, length_bytes, x=Required, y=Required, p=0):
         """Read a bytestring from an address in memory.
@@ -324,22 +585,29 @@ class MachineController(ContextMixin):
         :py:class:`bytes`
             The data is read back from memory as a bytestring.
         """
-        # Make calls to the lower level read method until we have read
-        # sufficient bytes.
-        data = b''
-        while len(data) < length_bytes:
+        scp_data_length = yield From(self.get_scp_data_length(async=True))
+
+        # Schedule a sequence of reads to perform
+        reads = []
+        while length_bytes:
             # Determine the number of bytes to read
-            reads = min(self.scp_data_length, length_bytes - len(data))
+            read_len = min(scp_data_length, length_bytes)
 
             # Determine the data type to use
-            dtype = address_length_dtype[(address % 4, reads % 4)]
+            dtype = address_length_dtype[(address % 4, read_len % 4)]
 
             # Perform the read and increment the address
-            data += self._read(x, y, p, address, reads, dtype)
-            address += reads
+            reads.append(self._read(x, y, p, address, read_len, dtype,
+                                    async=True))
+            address += read_len
+            length_bytes -= read_len
 
-        return data
+        # Wait for the reads to come back
+        responses = yield From(gather_fail(*reads, loop=self.loop))
+        raise Return(b''.join(responses))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _read(self, x, y, p, address, length_bytes, data_type=DataType.byte):
         """Read an SCP command's worth of data from an address in memory.
 
@@ -352,7 +620,7 @@ class MachineController(ContextMixin):
             The address at which to start reading the data.
         length_bytes : int
             The number of bytes to read from memory, must be <=
-            :py:attr:`.scp_data_length`
+            :py:meth:`.get_scp_data_length`
         data_type : DataType
             The size of the data to write into memory.
 
@@ -361,11 +629,14 @@ class MachineController(ContextMixin):
         :py:class:`bytes`
             The data is read back from memory as a bytestring.
         """
-        read_scp = self._send_scp(x, y, p, SCPCommands.read, address,
-                                  length_bytes, int(data_type),
-                                  expected_args=0)
-        return read_scp.data
+        read_scp = yield From(self._send_scp(x, y, p, SCPCommands.read,
+                                             address, length_bytes,
+                                             int(data_type), expected_args=0,
+                                             async=True))
+        raise Return(read_scp.data)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def read_struct_field(self, struct_name, field_name,
                           x=Required, y=Required, p=0):
@@ -404,16 +675,18 @@ class MachineController(ContextMixin):
         length = struct.calcsize(pack_chars)
 
         # Perform the read
-        data = self.read(address, length, x, y, p)
+        data = yield From(self.read(address, length, x, y, p, async=True))
 
         # Unpack the data
         unpacked = struct.unpack(pack_chars, data)
 
         if field.length == 1:
-            return unpacked[0]
+            raise Return(unpacked[0])
         else:
-            return unpacked
+            raise Return(unpacked)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def read_vcpu_struct_field(self, field_name, x=Required, y=Required,
                                p=Required):
@@ -437,29 +710,32 @@ class MachineController(ContextMixin):
         # to get the correct VCPU struct for the requested core.
         vcpu_struct = self.structs[b"vcpu"]
         field = vcpu_struct[six.b(field_name)]
-        address = (self.read_struct_field("sv", "vcpu_base", x, y) +
-                   vcpu_struct.size * p) + field.offset
+        address = yield From(self.read_struct_field("sv", "vcpu_base", x, y,
+                                                    async=True))
+        address = (address + vcpu_struct.size * p) + field.offset
 
         pack_chars = b"<" + field.pack_chars
 
         # Perform the read
         length = struct.calcsize(pack_chars)
-        data = self.read(address, length, x, y)
+        data = yield From(self.read(address, length, x, y, async=True))
 
         # Unpack and return
         unpacked = struct.unpack(pack_chars, data)
 
         if field.length == 1:
-            return unpacked[0]
+            raise Return(unpacked[0])
         else:
             # If the field is a string then truncate it and return
             if b"s" in pack_chars:
-                return unpacked[0].strip(b"\x00").decode("utf-8")
+                raise Return(unpacked[0].strip(b"\x00").decode("utf-8"))
 
             # Otherwise just return. (Note: at the time of writing, no fields
             # in the VCPU struct are of this form.)
-            return unpacked  # pragma: no cover
+            raise Return(unpacked)  # pragma: no cover
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_processor_status(self, p=Required, x=Required, y=Required):
         """Get the status of a given core and the application executing on it.
@@ -470,11 +746,13 @@ class MachineController(ContextMixin):
             Representation of the current state of the processor.
         """
         # Get the VCPU base
-        address = (self.read_struct_field("sv", "vcpu_base", x, y) +
-                   self.structs[b"vcpu"].size * p)
+        address = yield From(self.read_struct_field("sv", "vcpu_base", x, y,
+                                                    async=True))
+        address = (address + self.structs[b"vcpu"].size * p)
 
         # Get the VCPU data
-        data = self.read(address, self.structs[b"vcpu"].size, x, y)
+        data = yield From(self.read(address, self.structs[b"vcpu"].size, x, y,
+                                    async=True))
 
         # Build the kwargs that describe the current state
         state = {
@@ -495,8 +773,10 @@ class MachineController(ContextMixin):
                                  ("link_register", "lr"), ]:
             state[newname] = state.pop(oldname)
         state.pop("__PAD")
-        return ProcessorStatus(**state)
+        raise Return(ProcessorStatus(**state))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def iptag_set(self, iptag, addr, port, x=Required, y=Required):
         """Set the value of an IPTag.
@@ -516,10 +796,14 @@ class MachineController(ContextMixin):
         # Format the IP address
         ip_addr = struct.pack('!4B',
                               *map(int, socket.gethostbyname(addr).split('.')))
-        self._send_scp(x, y, 0, SCPCommands.iptag,
-                       int(consts.IPTagCommands.set) << 16 | iptag,
-                       port, struct.unpack('<I', ip_addr)[0])
+        # Note: returns a coroutine
+        return self._send_scp(x, y, 0, SCPCommands.iptag,
+                              int(consts.IPTagCommands.set) << 16 | iptag,
+                              port, struct.unpack('<I', ip_addr)[0],
+                              async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def iptag_get(self, iptag, x=Required, y=Required):
         """Get the value of an IPTag.
@@ -534,11 +818,16 @@ class MachineController(ContextMixin):
         :py:class:`.IPTag`
             The IPTag returned from SpiNNaker.
         """
-        ack = self._send_scp(x, y, 0, SCPCommands.iptag,
-                             int(consts.IPTagCommands.get) << 16 | iptag, 1,
-                             expected_args=0)
-        return IPTag.from_bytestring(ack.data)
+        ack = yield From(self._send_scp(x, y, 0, SCPCommands.iptag,
+                                        (int(consts.IPTagCommands.get) << 16 |
+                                         iptag),
+                                        1,
+                                        expected_args=0,
+                                        async=True))
+        raise Return(IPTag.from_bytestring(ack.data))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def iptag_clear(self, iptag, x=Required, y=Required):
         """Clear an IPTag.
@@ -548,9 +837,13 @@ class MachineController(ContextMixin):
         iptag : int
             Index of the IPTag to clear.
         """
-        self._send_scp(x, y, 0, SCPCommands.iptag,
-                       int(consts.IPTagCommands.clear) << 16 | iptag)
+        # Note: returns a coroutine
+        return self._send_scp(x, y, 0, SCPCommands.iptag,
+                              int(consts.IPTagCommands.clear) << 16 | iptag,
+                              async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def set_led(self, led, action=None, x=Required, y=Required):
         """Set or toggle the state of an LED.
@@ -572,8 +865,13 @@ class MachineController(ContextMixin):
         else:
             leds = led
         arg1 = sum(LEDAction.from_bool(action) << (led * 2) for led in leds)
-        self._send_scp(x, y, 0, SCPCommands.led, arg1=arg1, expected_args=0)
 
+        # Note: returns a coroutine
+        return self._send_scp(x, y, 0, SCPCommands.led, arg1=arg1,
+                              expected_args=0, async=True)
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def sdram_alloc(self, size, tag=0, x=Required, y=Required,
                     app_id=Required):
@@ -608,12 +906,15 @@ class MachineController(ContextMixin):
         arg1 = app_id << 8 | consts.AllocOperations.alloc_sdram
 
         # Send the packet and retrieve the address
-        rv = self._send_scp(x, y, 0, SCPCommands.alloc_free, arg1, size, tag)
+        rv = yield From(self._send_scp(x, y, 0, SCPCommands.alloc_free, arg1,
+                                       size, tag, async=True))
         if rv.arg1 == 0:
             # Allocation failed
             raise SpiNNakerMemoryError(size, x, y)
-        return rv.arg1
+        raise Return(rv.arg1)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def sdram_alloc_as_filelike(self, size, tag=0, x=Required, y=Required,
                                 app_id=Required):
@@ -633,51 +934,71 @@ class MachineController(ContextMixin):
             invalid.
         """
         # Perform the malloc
-        start_address = self.sdram_alloc(size, tag, x, y, app_id)
+        start_address = yield From(self.sdram_alloc(size, tag, x, y, app_id,
+                                                    async=True))
 
-        return MemoryIO(self, x, y, start_address, start_address + size)
+        raise Return(MemoryIO(self, x, y, start_address, start_address + size))
 
     def _get_next_nn_id(self):
         """Get the next nearest neighbour ID."""
         self._nn_id = self._nn_id + 1 if self._nn_id < 126 else 1
         return self._nn_id * 2
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _send_ffs(self, pid, region, n_blocks, fr):
         """Send a flood-fill start packet."""
         sfr = fr | (1 << 31)
-        self._send_scp(
+        # Note: returns a coroutine
+        return self._send_scp(
             0, 0, 0, SCPCommands.nearest_neighbour_packet,
             (NNCommands.flood_fill_start << 24) | (pid << 16) |
             (n_blocks << 8),
-            region, sfr
+            region, sfr,
+            async=True
         )
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _send_ffd(self, pid, aplx_data, address):
         """Send flood-fill data packets."""
+        scp_data_length = yield From(self.get_scp_data_length(async=True))
+
         block = 0
+        commands = []
         while len(aplx_data) > 0:
             # Get the next block of data, send and progress the block
             # counter and the address
-            data, aplx_data = (aplx_data[:self.scp_data_length],
-                               aplx_data[self.scp_data_length:])
+            data, aplx_data = (aplx_data[:scp_data_length],
+                               aplx_data[scp_data_length:])
             size = len(data) // 4 - 1
 
             arg1 = (NNConstants.forward << 24 | NNConstants.retry << 16 | pid)
             arg2 = (block << 16) | (size << 8)
-            self._send_scp(0, 0, 0, SCPCommands.flood_fill_data,
-                           arg1, arg2, address, data)
+            commands.append(self._send_scp(0, 0, 0,
+                                           SCPCommands.flood_fill_data,
+                                           arg1, arg2, address, data,
+                                           async=True))
 
             # Increment the address and the block counter
             block += 1
             address += len(data)
 
+        # Wait for all the data packets to arrive
+        yield From(gather_fail(*commands, loop=self.loop))
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def _send_ffe(self, pid, app_id, app_flags, cores, fr):
         """Send a flood-fill end packet."""
         arg1 = (NNCommands.flood_fill_end << 24) | pid
         arg2 = (app_id << 24) | (app_flags << 18) | (cores & 0x3fff)
-        self._send_scp(0, 0, 0, SCPCommands.nearest_neighbour_packet,
-                       arg1, arg2, fr)
+        # Note: returns a coroutine
+        return self._send_scp(0, 0, 0, SCPCommands.nearest_neighbour_packet,
+                              arg1, arg2, fr, async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_named_contextual_arguments(app_id=Required, wait=True)
     def flood_fill_aplx(self, *args, **kwargs):
         """Unreliably flood-fill APLX to a set of application cores.
@@ -741,6 +1062,8 @@ class MachineController(ContextMixin):
                 "targets"
             )
 
+        scp_data_length = yield From(self.get_scp_data_length(async=True))
+
         # Get the application ID, the context system will guarantee that this
         # is available
         app_id = kwargs.pop("app_id")
@@ -761,8 +1084,12 @@ class MachineController(ContextMixin):
             # Load the APLX data
             with open(aplx, "rb+") as f:
                 aplx_data = f.read()
-            n_blocks = ((len(aplx_data) + self.scp_data_length - 1) //
-                        self.scp_data_length)
+            n_blocks = ((len(aplx_data) + scp_data_length - 1) //
+                        scp_data_length)
+
+            # Work out where the data should be written
+            base_address = yield From(self.read_struct_field(
+                "sv", "sdram_sys", 0, 0, async=True))
 
             # Perform each flood-fill.
             for (region, cores) in fills:
@@ -770,16 +1097,19 @@ class MachineController(ContextMixin):
                 pid = self._get_next_nn_id()
 
                 # Send the flood-fill start packet
-                self._send_ffs(pid, region, n_blocks, fr)
+                yield From(self._send_ffs(pid, region, n_blocks, fr,
+                                          async=True))
 
                 # Send the data
-                base_address = self.read_struct_field(
-                    "sv", "sdram_sys", 0, 0)
-                self._send_ffd(pid, aplx_data, base_address)
+                yield From(self._send_ffd(pid, aplx_data, base_address,
+                                          async=True))
 
                 # Send the flood-fill END packet
-                self._send_ffe(pid, app_id, flags, cores, fr)
+                yield From(self._send_ffe(pid, app_id, flags, cores, fr,
+                                          async=True))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_named_contextual_arguments(app_id=Required, n_tries=2,
                                                  wait=False,
                                                  app_start_delay=0.1)
@@ -844,12 +1174,27 @@ class MachineController(ContextMixin):
 
             # Load all unloaded applications, then pause to ensure they reach
             # the wait state
-            self.flood_fill_aplx(unloaded, app_id=app_id, wait=True)
-            time.sleep(app_start_delay)
+            yield From(self.flood_fill_aplx(unloaded, app_id=app_id, wait=True,
+                       async=True))
+            yield From(trollius.sleep(app_start_delay, loop=self.loop))
 
-            # Query each target in turn to determine if it is loaded or
-            # otherwise.  If it is loaded (in the wait state) then remove it
-            # from the unloaded list.
+            # Query each target (in parallel) to determine if it is loaded or
+            # otherwise.
+            app_state_reads = []
+            for app_name, targets in iteritems(unloaded):
+                for (x, y), cores in iteritems(targets):
+                    for p in cores:
+                        app_state_reads.append(
+                            self.read_vcpu_struct_field("cpu_state", x, y, p,
+                                                        async=True))
+
+            # Wait for the queuries to return
+            responses = yield From(gather_fail(*app_state_reads,
+                                               loop=self.loop))
+            responses = iter(responses)
+
+            # If it is loaded (in the wait state) then remove it from the
+            # unloaded list.
             new_unloadeds = dict()
             for app_name, targets in iteritems(unloaded):
                 unloaded_targets = {}
@@ -858,9 +1203,7 @@ class MachineController(ContextMixin):
                     for p in cores:
                         # Read the struct value vcpu->cpu_state, if it is
                         # anything BUT wait then we mark this core as unloaded.
-                        state = consts.AppState(
-                            self.read_vcpu_struct_field("cpu_state", x, y, p)
-                        )
+                        state = consts.AppState(next(responses))
                         if state is not consts.AppState.wait:
                             unloaded_cores.add(p)
 
@@ -876,8 +1219,11 @@ class MachineController(ContextMixin):
 
         # If not waiting then send the start signal
         if not wait:
-            self.send_signal(consts.AppSignal.start, app_id)
+            yield From(self.send_signal(consts.AppSignal.start, app_id,
+                                        async=True))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def send_signal(self, signal, app_id=Required):
         """Transmit a signal to applications.
@@ -902,8 +1248,12 @@ class MachineController(ContextMixin):
         arg1 = consts.signal_types[signal]
         arg2 = (signal << 16) | 0xff00 | app_id
         arg3 = 0x0000ffff  # Meaning "transmit to all"
-        self._send_scp(0, 0, 0, SCPCommands.signal, arg1, arg2, arg3)
+        # Note: returns a coroutine
+        return self._send_scp(0, 0, 0, SCPCommands.signal, arg1, arg2, arg3,
+                              async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def load_routing_tables(self, routing_tables, app_id=Required):
         """Allocate space for an load multicast routing tables.
@@ -925,9 +1275,16 @@ class MachineController(ContextMixin):
         SpiNNakerRouterError
             If it is not possible to allocate sufficient routing table entries.
         """
+        load_commands = []
         for (x, y), table in iteritems(routing_tables):
-            self.load_routing_table_entries(table, x=x, y=y, app_id=app_id)
+            load_commands.append(
+                self.load_routing_table_entries(table, x=x, y=y, app_id=app_id,
+                                                async=True))
+        # Returns coroutine
+        return gather_fail(*load_commands, loop=self.loop)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def load_routing_table_entries(self, entries, x=Required, y=Required,
                                    app_id=Required):
@@ -952,17 +1309,19 @@ class MachineController(ContextMixin):
         count = len(entries)
 
         # Try to allocate room for the entries
-        rv = self._send_scp(
+        rv = yield From(self._send_scp(
             x, y, 0, SCPCommands.alloc_free,
-            (app_id << 8) | consts.AllocOperations.alloc_rtr, count
-        )
+            (app_id << 8) | consts.AllocOperations.alloc_rtr, count,
+            async=True
+        ))
         rtr_base = rv.arg1  # Index of the first allocated entry, 0 if failed
 
         if rtr_base == 0:
             raise SpiNNakerRouterError(count, x, y)
 
         # Determine where to write into memory
-        buf = self.read_struct_field("sv", "sdram_sys", x, y)
+        buf = yield From(self.read_struct_field("sv", "sdram_sys", x, y,
+                                                async=True))
 
         # Build the data to write in, then perform the write
         data = b""
@@ -974,15 +1333,17 @@ class MachineController(ContextMixin):
 
             data += struct.pack(
                 consts.RTE_PACK_STRING, i, 0, route, entry.key, entry.mask)
-        self.write(buf, data, x, y)
+        yield From(self.write(buf, data, x, y, async=True))
 
         # Perform the load of the data into the router
-        self._send_scp(
+        yield From(self._send_scp(
             x, y, 0, SCPCommands.router,
             (count << 16) | (app_id << 8) | consts.RouterOperations.load,
-            buf, rtr_base
-        )
+            buf, rtr_base, async=True
+        ))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_routing_table_entries(self, x=Required, y=Required):
         """Dump the multicast routing table of a given chip.
@@ -995,17 +1356,42 @@ class MachineController(ContextMixin):
             core numbers.
         """
         # Determine where to read from, perform the read
-        rtr_addr = self.read_struct_field("sv", "rtr_copy", x, y)
+        rtr_addr = yield From(self.read_struct_field("sv", "rtr_copy", x, y,
+                                                     async=True))
         read_size = struct.calcsize(consts.RTE_PACK_STRING)
-        rtr_data = self.read(rtr_addr, consts.RTR_ENTRIES * read_size, x, y)
+        rtr_data = yield From(self.read(rtr_addr,
+                                        consts.RTR_ENTRIES * read_size,
+                                        x, y, async=True))
 
         # Read each routing table entry in turn
         table = list()
         while len(rtr_data) > 0:
             entry, rtr_data = rtr_data[:read_size], rtr_data[read_size:]
             table.append(unpack_routing_table_entry(entry))
-        return table
+        raise Return(table)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
+    @ContextMixin.use_contextual_arguments
+    def get_dimensions(self, x=0, y=0):
+        """Get the system's reported dimensions.
+
+        Returns
+        -------
+        (width, height)
+            A tuple giving the width and height of the system in chips.
+        """
+        # Get the dimensions of the system
+        p2p_dims = yield From(self.read_struct_field("sv", "p2p_dims", x, y,
+                              async=True))
+        width = (p2p_dims >> 8) & 0xFF
+        height = (p2p_dims >> 0) & 0xFF
+        self._dimensions = (width, height)
+
+        raise Return((width, height))
+
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_p2p_routing_table(self, x=Required, y=Required):
         """Dump the contents of a chip's P2P routing table.
@@ -1024,21 +1410,25 @@ class MachineController(ContextMixin):
         table = {}
 
         # Get the dimensions of the system
-        p2p_dims = self.read_struct_field("sv", "p2p_dims", x, y)
-        width = (p2p_dims >> 8) & 0xFF
-        height = (p2p_dims >> 0) & 0xFF
+        width, height = yield From(self.get_dimensions(x, y, async=True))
+
+        col_words = (((height + 7) // 8) * 4)
 
         # Read out the P2P table data, one column at a time (note that eight
         # entries are packed into each 32-bit word)
-        col_words = (((height + 7) // 8) * 4)
+        reads = []
         for col in range(width):
             # Read the entries for this row
-            raw_table_col = self.read(
+            reads.append(self.read(
                 consts.SPINNAKER_RTR_P2P + (((256 * col) // 8) * 4),
                 col_words,
-                x, y
-            )
+                x, y, async=True
+            ))
 
+        raw_table_cols = yield From(gather_fail(*reads, loop=self.loop))
+
+        for col, raw_table_col in enumerate(raw_table_cols):
+            # Read the entries for this row
             row = 0
             while row < height:
                 raw_word, raw_table_col = raw_table_col[:4], raw_table_col[4:]
@@ -1048,8 +1438,10 @@ class MachineController(ContextMixin):
                         consts.P2PTableEntry((word >> (3*entry)) & 0b111)
                     row += 1
 
-        return table
+        raise Return(table)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_working_links(self, x=Required, y=Required):
         """Return the set of links reported as working.
@@ -1062,14 +1454,20 @@ class MachineController(ContextMixin):
         -------
         set([:py:class:`rig.machine.Links`, ...])
         """
-        link_up = self.read_struct_field("sv", "link_up", x, y)
-        return set(link for link in Links if link_up & (1 << link))
+        link_up = yield From(self.read_struct_field("sv", "link_up", x, y,
+                                                    async=True))
+        raise Return(set(link for link in Links if link_up & (1 << link)))
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     @ContextMixin.use_contextual_arguments
     def get_num_working_cores(self, x=Required, y=Required):
         """Return the number of working cores, including the monitor."""
-        return self.read_struct_field("sv", "num_cpus", x, y)
+        # Note: returns coroutine
+        return self.read_struct_field("sv", "num_cpus", x, y, async=True)
 
+    @LookBlockingMixin.look_blocking
+    @trollius.coroutine
     def get_machine(self, default_num_cores=18):
         """Probe the machine to discover which cores and links are working.
 
@@ -1106,7 +1504,7 @@ class MachineController(ContextMixin):
             :py:data:`~rig.machine.SRAM`
                 The size of the SysRAM heap.
         """
-        p2p_tables = self.get_p2p_routing_table(0, 0)
+        p2p_tables = yield From(self.get_p2p_routing_table(0, 0, async=True))
 
         # Calculate the extent of the system
         max_x = max(x for (x, y), r in iteritems(p2p_tables)
@@ -1115,10 +1513,13 @@ class MachineController(ContextMixin):
                     if r != consts.P2PTableEntry.none)
 
         # Discover the heap sizes available for memory allocation
-        sdram_start = self.read_struct_field("sv", "sdram_heap", 0, 0)
-        sdram_end = self.read_struct_field("sv", "sdram_sys", 0, 0)
-        sysram_start = self.read_struct_field("sv", "sysram_heap", 0, 0)
-        sysram_end = self.read_struct_field("sv", "vcpu_base", 0, 0)
+        sdram_start, sdram_end, sysram_start, sysram_end = \
+            yield From(gather_fail(
+                self.read_struct_field("sv", "sdram_heap", 0, 0, async=True),
+                self.read_struct_field("sv", "sdram_sys", 0, 0, async=True),
+                self.read_struct_field("sv", "sysram_heap", 0, 0, async=True),
+                self.read_struct_field("sv", "vcpu_base", 0, 0, async=True),
+                loop=self.loop))
 
         chip_resources = {Cores: default_num_cores,
                           SDRAM: sdram_end - sdram_start,
@@ -1128,27 +1529,41 @@ class MachineController(ContextMixin):
         chip_resource_exceptions = {}
 
         # Discover dead links and cores
+        xys = []
+        working_core_commands = []
+        working_link_commands = []
         for (x, y), p2p_route in iteritems(p2p_tables):
             if x <= max_x and y <= max_y:
                 if p2p_route == consts.P2PTableEntry.none:
                     dead_chips.add((x, y))
                 else:
-                    num_working_cores = self.get_num_working_cores(x, y)
-                    working_links = self.get_working_links(x, y)
+                    xys.append((x, y))
+                    working_core_commands.append(
+                        self.get_num_working_cores(x, y, async=True))
+                    working_link_commands.append(
+                        self.get_working_links(x, y, async=True))
 
-                    if num_working_cores < default_num_cores:
-                        resource_exception = chip_resources.copy()
-                        resource_exception[Cores] = min(default_num_cores,
-                                                        num_working_cores)
-                        chip_resource_exceptions[(x, y)] = resource_exception
+        read_working_cores = yield From(gather_fail(*working_core_commands,
+                                                    loop=self.loop))
+        read_working_links = yield From(gather_fail(*working_link_commands,
+                                                    loop=self.loop))
 
-                    for link in set(Links) - working_links:
-                        dead_links.add((x, y, link))
+        # Apply discovered dead links/cores
+        for (x, y), num_cores, working_links in zip(xys,
+                                                    read_working_cores,
+                                                    read_working_links):
+            if num_cores < default_num_cores:
+                resource_exception = chip_resources.copy()
+                resource_exception[Cores] = min(default_num_cores, num_cores)
+                chip_resource_exceptions[(x, y)] = resource_exception
 
-        return Machine(max_x + 1, max_y + 1,
-                       chip_resources,
-                       chip_resource_exceptions,
-                       dead_chips, dead_links)
+            for link in set(Links) - working_links:
+                dead_links.add((x, y, link))
+
+        raise Return(Machine(max_x + 1, max_y + 1,
+                             chip_resources,
+                             chip_resource_exceptions,
+                             dead_chips, dead_links))
 
 
 class CoreInfo(collections.namedtuple(

@@ -1,125 +1,13 @@
-"""Specifications of constraints for placement, allocation and routing.
-
-All constraints defined in this module should be respected by any placement and
-routing algorithm. Individual algorithms are permitted to define their own
-implementation-specific constraints seperately.
-"""
-
-
+'Specifications of constraints for placement, allocation and routing.\n\nAll constraints defined in this module should be respected by any placement and\nrouting algorithm. Individual algorithms are permitted to define their own\nimplementation-specific constraints seperately.\n'
 class LocationConstraint(object):
-    """Unconditionally place a vertex on a specific chip.
-
-    Attributes
-    ----------
-    vertex : object
-        The user-supplied object representing the vertex.
-    location : (x, y)
-        The x- and y-coordinates of the chip the vertex must be placed on.
-    """
-
-    __slots__ = ["vertex", "location"]
-
-    def __init__(self, vertex, location):
-        self.vertex = vertex
-        self.location = location
-
-
+ 'Unconditionally place a vertex on a specific chip.\n\n    Attributes\n    ----------\n    vertex : object\n        The user-supplied object representing the vertex.\n    location : (x, y)\n        The x- and y-coordinates of the chip the vertex must be placed on.\n    ';__slots__=['vertex','location']
+ def __init__(self,vertex,location):self.vertex=vertex;self.location=location
 class ReserveResourceConstraint(object):
-    """Reserve a range of a resource on all or a specific chip.
-
-    For example, this can be used to reserve areas of SDRAM used by the system
-    software to prevent allocations occurring there.
-
-    Note: Reserved ranges must *not* be be partly or fully outside the
-    available resources for a chip nor may they overlap with one another.
-    Violation of these rules will result in undefined behaviour.
-
-    Note: placers are obliged by this constraint to subtract the reserved
-    resource from the total available resource but *not* to determine whether
-    the remaining resources include sufficient continuous ranges of resource
-    for their placement. Users should thus be extremely careful reserving
-    resources which are not immediately at the beginning or end of a resource
-    range.
-
-    Attributes
-    ----------
-    resource : object
-        A resource identifier for the resource being reserved.
-    reservation : :py:class:`slice`
-        The range over that resource which must not be used.
-    location : (x, y) or None
-        The chip to which this reservation applies. If None then the
-        reservation applies globally.
-    """
-
-    __slots__ = ["resource", "reservation", "location"]
-
-    def __init__(self, resource, reservation, location=None):
-        self.resource = resource
-        self.reservation = reservation
-        self.location = location
-
-
+ 'Reserve a range of a resource on all or a specific chip.\n\n    For example, this can be used to reserve areas of SDRAM used by the system\n    software to prevent allocations occurring there.\n\n    Note: Reserved ranges must *not* be be partly or fully outside the\n    available resources for a chip nor may they overlap with one another.\n    Violation of these rules will result in undefined behaviour.\n\n    Note: placers are obliged by this constraint to subtract the reserved\n    resource from the total available resource but *not* to determine whether\n    the remaining resources include sufficient continuous ranges of resource\n    for their placement. Users should thus be extremely careful reserving\n    resources which are not immediately at the beginning or end of a resource\n    range.\n\n    Attributes\n    ----------\n    resource : object\n        A resource identifier for the resource being reserved.\n    reservation : :py:class:`slice`\n        The range over that resource which must not be used.\n    location : (x, y) or None\n        The chip to which this reservation applies. If None then the\n        reservation applies globally.\n    ';__slots__=['resource','reservation','location']
+ def __init__(self,resource,reservation,location=None):self.resource=resource;self.reservation=reservation;self.location=location
 class AlignResourceConstraint(object):
-    """Force alignment of start-indices of resource ranges.
-
-    For example, this can be used to ensure assignments into SDRAM are word
-    aligned.
-
-    Note: placers are not obliged to be aware of or compensate for wastage of a
-    resource due to this constraint and so may produce impossible placements in
-    the event of large numbers of individual items using a non-aligned width
-    block of resource.
-
-    Attributes
-    ----------
-    resource : object
-        A resource identifier for the resource to align.
-    alignment : int
-        The number of which all assigned start-indices must be a multiple.
-    """
-
-    __slots__ = ["resource", "alignment"]
-
-    def __init__(self, resource, alignment):
-        self.resource = resource
-        self.alignment = alignment
-
-
+ 'Force alignment of start-indices of resource ranges.\n\n    For example, this can be used to ensure assignments into SDRAM are word\n    aligned.\n\n    Note: placers are not obliged to be aware of or compensate for wastage of a\n    resource due to this constraint and so may produce impossible placements in\n    the event of large numbers of individual items using a non-aligned width\n    block of resource.\n\n    Attributes\n    ----------\n    resource : object\n        A resource identifier for the resource to align.\n    alignment : int\n        The number of which all assigned start-indices must be a multiple.\n    ';__slots__=['resource','alignment']
+ def __init__(self,resource,alignment):self.resource=resource;self.alignment=alignment
 class RouteEndpointConstraint(object):
-    """Force the endpoint of a path through the network to be a particular
-    route.
-
-    This constraint forces routes to/from the constrained vertex to terminate
-    on the route specified in the constraint. For example, this could be used
-    with a vertex representing an external device to force packets sent to the
-    vertex to be absorbed.
-
-    Note: This constraint does not check for dead links. This is useful since
-    links attached to external devices will not typically respond to
-    nearest-neighbour PEEK/POKE requests used by the SpiNNaker software to
-    detect link liveness.
-
-    **Example Usage**
-
-    If a silicon retina is attached to the north link of chip (1,1) in a 2x2
-    SpiNNaker machine, the following pair of constraints will ensure traffic
-    destined for the device vertex is routed to the appropriate link::
-
-        my_device_vertex = ...
-        constraints = [LocationConstraint(my_device_vertex, (1, 1)),
-                       RouteEndpointConstraint(my_device_vertex, Routes.north)]
-
-    Attributes
-    ----------
-    vertex : object
-        The user-supplied object representing the vertex.
-    route : :py:class:`~rig.routing_table.Routes`
-        The route to which paths will be directed.
-    """
-
-    __slots__ = ["vertex", "route"]
-
-    def __init__(self, vertex, route):
-        self.vertex = vertex
-        self.route = route
+ 'Force the endpoint of a path through the network to be a particular\n    route.\n\n    This constraint forces routes to/from the constrained vertex to terminate\n    on the route specified in the constraint. For example, this could be used\n    with a vertex representing an external device to force packets sent to the\n    vertex to be absorbed.\n\n    Note: This constraint does not check for dead links. This is useful since\n    links attached to external devices will not typically respond to\n    nearest-neighbour PEEK/POKE requests used by the SpiNNaker software to\n    detect link liveness.\n\n    **Example Usage**\n\n    If a silicon retina is attached to the north link of chip (1,1) in a 2x2\n    SpiNNaker machine, the following pair of constraints will ensure traffic\n    destined for the device vertex is routed to the appropriate link::\n\n        my_device_vertex = ...\n        constraints = [LocationConstraint(my_device_vertex, (1, 1)),\n                       RouteEndpointConstraint(my_device_vertex, Routes.north)]\n\n    Attributes\n    ----------\n    vertex : object\n        The user-supplied object representing the vertex.\n    route : :py:class:`~rig.routing_table.Routes`\n        The route to which paths will be directed.\n    ';__slots__=['vertex','route']
+ def __init__(self,vertex,route):self.vertex=vertex;self.route=route

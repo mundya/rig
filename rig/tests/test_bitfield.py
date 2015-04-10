@@ -601,3 +601,17 @@ def test_repr():
     assert "'s1'" not in repr(ks_s0)
     assert "'s0'" not in repr(ks_s1)
     assert "'s1'" in repr(ks_s1)
+
+
+def test_subclass():
+    """It should be possible to inherit from BitField and still have __call__
+    work.
+    """
+    class MyBitField(BitField):
+        pass
+
+    x = MyBitField()
+    x.add_field("spam")
+
+    y = x(spam=0)
+    assert isinstance(y, MyBitField)

@@ -221,7 +221,7 @@ class BitField(object):
             self.fields[identifier].max_value = max(
                 self.fields[identifier].max_value, value)
 
-        return BitField(self.length, self.fields, field_values)
+        return type(self)(self.length, self.fields, field_values)
 
     def __getattr__(self, identifier):
         """Get the value of a field.

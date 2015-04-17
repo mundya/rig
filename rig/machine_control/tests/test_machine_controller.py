@@ -1541,6 +1541,40 @@ class TestMachineController(object):
             if (x, y) != (3, 3)
         ], any_order=True)
 
+    @pytest.mark.parametrize(
+        "fn, signal, app_id",
+        [("sync0", consts.AppSignal.sync0, 34),
+         ("sync1", consts.AppSignal.sync1, 66),
+         ("app_start", consts.AppSignal.start, 62),
+         ("app_stop", consts.AppSignal.stop, 21)])
+    def test_signal_wrappers(self, mock_controller, fn, signal, app_id):
+        """Test the wrappers for sending signals."""
+        # Create the controller
+        cn = MachineController("localhost")
+        cn.send_signal = mock.Mock()
+
+        # Send the signal
+        getattr(cn, fn)(app_id)
+
+        # Assert send signal was called correctly
+        cn.send_signal.assert_called_once_with(signal, app_id)
+
+    @pytest.mark.parametrize("app_id", [66, 12])
+    def test_application_wrapper(self, app_id):
+        # Create the controller
+        cn = MachineController("localhost")
+        cn.send_signal = mock.Mock()
+
+        # Open the context, the command run within this context should use
+        # app_id=app_id
+        with cn.application(app_id):
+            cn.app_start()
+            cn.send_signal.assert_called_once_with(consts.AppSignal.start,
+                                                   app_id)
+
+        # Exiting the context should result in calling app_stop
+        cn.send_signal.assert_called_with(consts.AppSignal.stop, app_id)
+
 
 class TestMemoryIO(object):
     """Test the SDRAM file-like object."""

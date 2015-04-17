@@ -233,6 +233,24 @@ class MachineController(ContextMixin):
         assert len(self.structs) > 0
 
     @ContextMixin.use_contextual_arguments
+    def application(self, app_id=Required):
+        """Update the context to use the given application ID and stop the
+        application when done.
+
+        For example::
+
+            with cn.application(54):
+                # All commands in this block will use app_id=54.
+                # On leaving the block `cn.app_stop(54)` is automatically
+                # called.
+        """
+        # Get a new context and add a method that will be called before the
+        # context is removed from the stack.
+        context = self(app_id=app_id)
+        context.before_close(self.app_stop)
+        return context
+
+    @ContextMixin.use_contextual_arguments
     def get_software_version(self, x=Required, y=Required, processor=0):
         """Get the software version for a given SpiNNaker core.
 
@@ -915,6 +933,30 @@ class MachineController(ContextMixin):
         arg2 = (signal << 16) | 0xff00 | app_id
         arg3 = 0x0000ffff  # Meaning "transmit to all"
         self._send_scp(0, 0, 0, SCPCommands.signal, arg1, arg2, arg3)
+
+    @ContextMixin.use_contextual_arguments
+    def app_start(self, app_id=Required):
+        """Transmit a signal to start the application."""
+        self.send_signal(consts.AppSignal.start, app_id)
+
+    @ContextMixin.use_contextual_arguments
+    def app_stop(self, app_id=Required):
+        """Transmit a signal to stop the application."""
+        self.send_signal(consts.AppSignal.stop, app_id)
+
+    @ContextMixin.use_contextual_arguments
+    def sync0(self, app_id=Required):
+        """Transmit a signal to cause applications to proceed past the first
+        synchronisation barrier.
+        """
+        self.send_signal(consts.AppSignal.sync0, app_id)
+
+    @ContextMixin.use_contextual_arguments
+    def sync1(self, app_id=Required):
+        """Transmit a signal to cause applications to proceed past the second
+        synchronisation barrier.
+        """
+        self.send_signal(consts.AppSignal.sync1, app_id)
 
     @ContextMixin.use_contextual_arguments
     def count_cores_in_state(self, state, app_id=Required):

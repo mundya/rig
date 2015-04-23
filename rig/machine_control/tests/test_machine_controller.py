@@ -177,7 +177,7 @@ class TestMachineControllerLive(object):
         """Check that we have no idle cores as there are no cores assigned to
         the application yet.
         """
-        assert controller.count_cores_in_state(consts.AppState.idle) == 0
+        assert controller.count_cores_in_state("idle") == 0
 
     @pytest.mark.parametrize(
         "targets",
@@ -220,7 +220,7 @@ class TestMachineControllerLive(object):
     )
     def test_count_cores_in_state_run(self, controller, all_targets):
         expected = sum(len(cs) for cs in itervalues(all_targets))
-        assert expected == controller.count_cores_in_state(consts.AppState.run)
+        assert expected == controller.count_cores_in_state("run")
 
     @pytest.mark.parametrize(
         "targets",
@@ -334,8 +334,8 @@ class TestMachineControllerLive(object):
             assert (route, app_id, 0) in loaded
 
     def test_app_stop_and_count(self, controller):
-        controller.send_signal(consts.AppSignal.stop)
-        assert controller.count_cores_in_state(consts.AppState.run) == 0
+        controller.send_signal("stop")
+        assert controller.count_cores_in_state("run") == 0
 
 
 class TestMachineController(object):
@@ -1143,7 +1143,7 @@ class TestMachineController(object):
         ])
 
         # Start signal sent
-        cn.send_signal.assert_called_once_with(consts.AppSignal.start, app_id)
+        cn.send_signal.assert_called_once_with("start", app_id)
 
     def test_load_and_check_aplxs_fails(self):
         """Test that APLX loading takes place multiple times if one of the
@@ -1176,20 +1176,24 @@ class TestMachineController(object):
 
         assert "(0, 1, 4)" in str(excinfo.value)
 
-    def test_send_signal_fails(self):
-        """Test that we refuse to send diagnostic signals which need treating
-        specially.
-        """
+    @pytest.mark.parametrize("signal", ["non-existant",
+                                        consts.AppDiagnosticSignal.AND])
+    def test_send_signal_fails(self, signal):
+        # Make sure that the send_signal function rejects bad signal identifiers
+        # (or ones that require special treatment)
         cn = MachineController("localhost")
-
         with pytest.raises(ValueError):
-            cn.send_signal(consts.AppDiagnosticSignal.AND)
+            cn.send_signal(signal)
 
     @pytest.mark.parametrize("app_id", [16, 30])
-    @pytest.mark.parametrize("signal", [consts.AppSignal.sync0,
-                                        consts.AppSignal.timer,
-                                        consts.AppSignal.start])
-    def test_send_signal_one_target(self, app_id, signal):
+    @pytest.mark.parametrize("signal,expected_signal_num",
+                             [(consts.AppSignal.sync0, consts.AppSignal.sync0),
+                              (consts.AppSignal.timer, consts.AppSignal.timer),
+                              (consts.AppSignal.start, consts.AppSignal.start),
+                              ("sync0", consts.AppSignal.sync0),
+                              ("timer", consts.AppSignal.timer),
+                              ("start", consts.AppSignal.start)])
+    def test_send_signal_one_target(self, app_id, signal, expected_signal_num):
         # Create the controller
         cn = MachineController("localhost")
         cn._send_scp = mock.Mock()
@@ -1205,16 +1209,20 @@ class TestMachineController(object):
 
         (cmd, arg1, arg2, arg3) = cargs[3:8]
         assert cmd == SCPCommands.signal
-        assert arg1 == consts.signal_types[signal]
+        assert arg1 == consts.signal_types[expected_signal_num]
         assert arg2 & 0x000000ff == app_id
         assert arg2 & 0x0000ff00 == 0xff00  # App mask for 1 app_id
-        assert arg2 & 0x00ff0000 == signal << 16
+        assert arg2 & 0x00ff0000 == expected_signal_num << 16
         assert arg3 == 0x0000ffff  # Transmit to all
 
     @pytest.mark.parametrize("app_id, count", [(16, 3), (30, 68)])
-    @pytest.mark.parametrize("state", [consts.AppState.idle,
-                                       consts.AppState.run])
-    def test_count_cores_in_state(self, app_id, count, state):
+    @pytest.mark.parametrize("state, expected_state_num",
+                             [(consts.AppState.idle, consts.AppState.idle),
+                              (consts.AppState.run, consts.AppState.run),
+                              ("idle", consts.AppState.idle),
+                              ("run", consts.AppState.run)])
+    def test_count_cores_in_state(self, app_id, count,
+                                  state, expected_state_num):
         # Create the controller
         cn = MachineController("localhost")
         cn._send_scp = mock.Mock()
@@ -1240,12 +1248,21 @@ class TestMachineController(object):
         # level | op | mode | state | app_mask | app_id
         assert arg2 & 0x000000ff == app_id
         assert arg2 & 0x0000ff00 == 0xff00  # App mask for 1 app_id
-        assert arg2 & 0x000f0000 == state << 16
+        assert arg2 & 0x000f0000 == expected_state_num << 16
         assert arg2 & 0x00300000 == consts.AppDiagnosticSignal.count << 20
         assert arg2 & 0x03c00000 == 1 << 22  # op == 1
         assert arg2 & 0x0c000000 == 0  # level == 0
 
         assert arg3 == 0x0000ffff  # Transmit to all
+
+    @pytest.mark.parametrize("state", ["non-existant",
+                                       consts.AppDiagnosticSignal.AND])
+    def test_count_cores_in_state_fails(self, state):
+        # Make sure that the count_cores_in_state function rejects bad state
+        # identifiers (or ones that require special treatment)
+        cn = MachineController("localhost")
+        with pytest.raises(ValueError):
+            cn.count_cores_in_state(state)
 
     @pytest.mark.parametrize("x, y, app_id", [(1, 2, 32), (4, 10, 17)])
     @pytest.mark.parametrize(
@@ -1541,39 +1558,22 @@ class TestMachineController(object):
             if (x, y) != (3, 3)
         ], any_order=True)
 
-    @pytest.mark.parametrize(
-        "fn, signal, app_id",
-        [("sync0", consts.AppSignal.sync0, 34),
-         ("sync1", consts.AppSignal.sync1, 66),
-         ("app_start", consts.AppSignal.start, 62),
-         ("app_stop", consts.AppSignal.stop, 21)])
-    def test_signal_wrappers(self, mock_controller, fn, signal, app_id):
-        """Test the wrappers for sending signals."""
-        # Create the controller
-        cn = MachineController("localhost")
-        cn.send_signal = mock.Mock()
-
-        # Send the signal
-        getattr(cn, fn)(app_id)
-
-        # Assert send signal was called correctly
-        cn.send_signal.assert_called_once_with(signal, app_id)
-
     @pytest.mark.parametrize("app_id", [66, 12])
     def test_application_wrapper(self, app_id):
         # Create the controller
         cn = MachineController("localhost")
         cn.send_signal = mock.Mock()
+        cn.sdram_alloc = mock.Mock()
+        cn.sdram_alloc.return_value = 0
 
         # Open the context, the command run within this context should use
         # app_id=app_id
         with cn.application(app_id):
-            cn.app_start()
-            cn.send_signal.assert_called_once_with(consts.AppSignal.start,
-                                                   app_id)
+            cn.sdram_alloc_as_filelike(128, tag=0, x=0, y=0)
+            cn.sdram_alloc.assert_called_once_with(128, 0, 0, 0, app_id)
 
         # Exiting the context should result in calling app_stop
-        cn.send_signal.assert_called_with(consts.AppSignal.stop, app_id)
+        cn.send_signal.assert_called_once_with("stop")
 
 
 class TestMemoryIO(object):

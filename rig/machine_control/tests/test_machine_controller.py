@@ -6,6 +6,7 @@ from six import iteritems, itervalues
 import struct
 import tempfile
 import os
+import time
 from .test_scp_connection import SendReceive, mock_conn  # noqa
 
 from ..consts import DataType, SCPCommands, LEDAction, NNCommands, NNConstants
@@ -1179,8 +1180,8 @@ class TestMachineController(object):
     @pytest.mark.parametrize("signal", ["non-existant",
                                         consts.AppDiagnosticSignal.AND])
     def test_send_signal_fails(self, signal):
-        # Make sure that the send_signal function rejects bad signal identifiers
-        # (or ones that require special treatment)
+        # Make sure that the send_signal function rejects bad signal
+        # identifiers (or ones that require special treatment)
         cn = MachineController("localhost")
         with pytest.raises(ValueError):
             cn.send_signal(signal)
@@ -1263,6 +1264,67 @@ class TestMachineController(object):
         cn = MachineController("localhost")
         with pytest.raises(ValueError):
             cn.count_cores_in_state(state)
+
+    @pytest.mark.parametrize("app_id, count", [(16, 3), (30, 68)])
+    @pytest.mark.parametrize("n_tries", [1, 3])
+    @pytest.mark.parametrize("timeout", [None, 1.0])
+    @pytest.mark.parametrize("excess", [True, False])
+    @pytest.mark.parametrize("state", [consts.AppState.idle, "run"])
+    def test_wait_for_cores_to_reach_state(self, app_id, count, n_tries,
+                                           timeout, excess, state):
+        # Create the controller
+        cn = MachineController("localhost")
+
+        # The count_cores_in_state mock will return less than the required
+        # number of cores the first n_tries attempts and then start returning a
+        # suffient number of cores.
+        cn.count_cores_in_state = mock.Mock()
+        n_tries_elapsed = [0]
+
+        def count_cores_in_state(state_, app_id_):
+            assert state_ == state
+            assert app_id_ == app_id
+
+            if n_tries_elapsed[0] < n_tries:
+                n_tries_elapsed[0] += 1
+                return count - 1
+            else:
+                if excess:
+                    return count + 1
+                else:
+                    return count
+        cn.count_cores_in_state.side_effect = count_cores_in_state
+
+        val = cn.wait_for_cores_to_reach_state(state, count, app_id,
+                                               0.001, timeout)
+        if excess:
+            assert val == count + 1
+        else:
+            assert val == count
+
+        assert n_tries_elapsed[0] == n_tries
+
+    def test_wait_for_cores_to_reach_state_timeout(self):
+        # Create the controller
+        cn = MachineController("localhost")
+
+        cn.count_cores_in_state = mock.Mock()
+        cn.count_cores_in_state.return_value = 0
+
+        time_before = time.time()
+        val = cn.wait_for_cores_to_reach_state("sync0", 10, 30, 0.01, 0.05)
+        time_after = time.time()
+
+        assert val == 0
+
+        # The timeout interval should have at least occurred
+        assert (time_after - time_before) >= 0.05
+
+        # At least two attempts should have been possible in that time
+        assert len(cn.count_cores_in_state.mock_calls) >= 2
+
+        for call in cn.count_cores_in_state.mock_calls:
+            assert call == mock.call("sync0", 30)
 
     @pytest.mark.parametrize("x, y, app_id", [(1, 2, 32), (4, 10, 17)])
     @pytest.mark.parametrize(

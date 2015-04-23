@@ -916,7 +916,7 @@ class MachineController(ContextMixin):
             In current implementations of SARK, signals are highly likely to
             arrive but this is not guaranteed (especially when the system's
             network is heavily utilised). Users should treat this mechanism
-            with caution.
+            with caution. Future versions of SARK may resolve this issue.
 
         Parameters
         ----------
@@ -953,16 +953,17 @@ class MachineController(ContextMixin):
             In current implementations of SARK, signals (which are used to
             determine the state of cores) are highly likely to arrive but this
             is not guaranteed (especially when the system's network is heavily
-            utilised). Users should treat this mechanism with caution.
+            utilised). Users should treat this mechanism with caution. Future
+            versions of SARK may resolve this issue.
 
         Parameters
         ----------
-        state : string or :py:class:`~rig.machine_control.consts.AppSignal`
+        state : string or :py:class:`~rig.machine_control.consts.AppState`
             Count the number of cores currently in this state. This may be
             either an entry of the
-            :py:class:`~rig.machine_control.consts.AppSignal` enum or, for
+            :py:class:`~rig.machine_control.consts.AppState` enum or, for
             convenience, the name of a state (defined in
-            :py:class:`~rig.machine_control.consts.AppSignal`) as a string.
+            :py:class:`~rig.machine_control.consts.AppState`) as a string.
         """
         if isinstance(state, str):
             try:
@@ -976,7 +977,7 @@ class MachineController(ContextMixin):
             raise ValueError(
                 "count_cores_in_state: Unknown state {}".format(
                     repr(state)))
-        
+
         # TODO Determine a way to nicely express a way to use the region data
         # stored in arg3.
         region = 0x0000ffff  # Largest possible machine, level 0
@@ -993,6 +994,65 @@ class MachineController(ContextMixin):
         # Transmit and return the count
         return self._send_scp(
             0, 0, 0, SCPCommands.signal, arg1, arg2, arg3).arg1
+
+    @ContextMixin.use_contextual_arguments
+    def wait_for_cores_to_reach_state(self, state, count, app_id=Required,
+                                      poll_interval=0.1, timeout=None):
+        """Block until the specified number of cores reach the specified state.
+
+        This is a simple utility-wrapper around the
+        :py:meth:`.count_cores_in_state` method which polls the machine until
+        (at least) the supplied number of cores has reached the specified
+        state.
+
+        .. warning::
+            In current implementations of SARK, signals (which are used to
+            determine the state of cores) are highly likely to arrive but this
+            is not guaranteed (especially when the system's network is heavily
+            utilised). As a result, in uncommon-but-possible circumstances,
+            this function may never exit. Users should treat this function with
+            caution. Future versions of SARK may resolve this issue.
+
+        Parameters
+        ----------
+        state : string or :py:class:`~rig.machine_control.consts.AppState`
+            The state to wait for cores to enter. This may be
+            either an entry of the
+            :py:class:`~rig.machine_control.consts.AppState` enum or, for
+            convenience, the name of a state (defined in
+            :py:class:`~rig.machine_control.consts.AppState`) as a string.
+        count : int
+            The (minimum) number of cores reach the specified state before this
+            method terminates.
+        poll_interval : float
+            Number of seconds between state counting requests sent to the
+            machine.
+        timeout : float or Null
+            Maximum number of seconds which may elapse before giving up. If
+            None, keep trying forever.
+
+        Returns
+        -------
+        int
+            The number of cores in the given state (which will be less than the
+            number required if the method timed out).
+        """
+        if timeout is not None:
+            timeout_time = time.time() + timeout
+
+        while True:
+            cur_count = self.count_cores_in_state(state, app_id)
+            if cur_count >= count:
+                break
+
+            # Stop if timeout ellapsed
+            if timeout is not None and time.time() > timeout_time:
+                break
+
+            # Pause before retrying
+            time.sleep(poll_interval)
+
+        return cur_count
 
     @ContextMixin.use_contextual_arguments
     def load_routing_tables(self, routing_tables, app_id=Required):

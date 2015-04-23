@@ -1045,7 +1045,7 @@ class MachineController(ContextMixin):
             if cur_count >= count:
                 break
 
-            # Stop if timeout ellapsed
+            # Stop if timeout elapsed
             if timeout is not None and time.time() > timeout_time:
                 break
 

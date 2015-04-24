@@ -78,7 +78,11 @@ def pytest_runtest_setup(item):  # pragma: no cover
 
     for (mark, option, message) in [
             ("no_boot", "--no-boot", "don't (re)boot the SpiNNaker machine")]:
-        if getattr(item.obj, mark, None) and not item.config.getoption(option):
+        obj = getattr(item, "obj", None)
+        if obj is None:
+            continue
+
+        if getattr(obj, mark, None) and not item.config.getoption(option):
             pytest.skip(message)
 
 

@@ -69,6 +69,8 @@ bug in the test suite.
   does not indicate comprehensive tests.
 * [flake8](https://pypi.python.org/pypi/flake8) to enforce a [consistent code
   style](https://www.python.org/dev/peps/pep-0008/).
+* [pytest-flake8](https://pypi.python.org/pypi/pytest-flake8) to ensure code
+  style compliance when running tests.
 
 The test suite requires a number of additional Python packages to run which can
 be installed using::

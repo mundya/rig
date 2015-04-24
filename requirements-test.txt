@@ -1,5 +1,6 @@
 pytest>=2.6
 pytest-cov
 flake8
+pytest-flake8
 mock
 toposort

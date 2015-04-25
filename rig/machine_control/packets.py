@@ -52,8 +52,10 @@ class SDPPacket(object):
         src_y = (src_p2p & 0x00ff)
 
         # Neaten up the combined VCPU and port fields
-        dest_cpu, dest_port = cls.unpack_dest_cpu_port(dest_cpu_port)
-        src_cpu, src_port = cls.unpack_dest_cpu_port(src_cpu_port)
+        dest_cpu = dest_cpu_port & 0x1f
+        dest_port = (dest_cpu_port >> 5) & 0x07
+        src_cpu = src_cpu_port & 0x1f
+        src_port = (src_cpu_port >> 5) & 0x07
 
         # Create a dictionary representing the packet.
         return dict(
@@ -73,22 +75,6 @@ class SDPPacket(object):
         """
         return cls(**cls.unpack_packet(bytestring))
 
-    @staticmethod
-    def pack_dest_cpu_port(port, cpu):
-        return ((port & 0x07) << 5) | (cpu & 0x1f)
-
-    @staticmethod
-    def unpack_dest_cpu_port(portcpu):
-        return portcpu & 0x1f, ((portcpu >> 5) & 0x07)
-
-    @property
-    def packed_dest_cpu_port(self):
-        return self.pack_dest_cpu_port(self.dest_port, self.dest_cpu)
-
-    @property
-    def packed_src_cpu_port(self):
-        return self.pack_dest_cpu_port(self.src_port, self.src_cpu)
-
     @property
     def packed_data(self):
         return self.data
@@ -100,10 +86,15 @@ class SDPPacket(object):
         dest_p2p = (self.dest_x << 8) | self.dest_y
         src_p2p = (self.src_x << 8) | self.src_y
 
+        packed_dest_cpu_port = (((self.dest_port & 0x7) << 5) |
+                                (self.dest_cpu & 0x1f))
+        packed_src_cpu_port = (((self.src_port & 0x7) << 5) |
+                               (self.src_cpu & 0x1f))
+
         # Construct the header
         header = struct.pack(
             '<4B2H', FLAG_REPLY if self.reply_expected else FLAG_NO_REPLY,
-            self.tag, self.packed_dest_cpu_port, self.packed_src_cpu_port,
+            self.tag, packed_dest_cpu_port, packed_src_cpu_port,
             dest_p2p, src_p2p
         )
 

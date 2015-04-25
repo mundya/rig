@@ -10,8 +10,7 @@ import time
 import pkg_resources
 
 from . import struct_file
-from .consts import SCPCommands, DataType, NNCommands, NNConstants, \
-    AppFlags, LEDAction
+from .consts import SCPCommands, NNCommands, NNConstants, AppFlags, LEDAction
 from . import boot, consts, regions
 from .scp_connection import SCPConnection
 

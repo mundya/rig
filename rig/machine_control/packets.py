@@ -1,87 +1,15 @@
 """Representations of SDP and SCP Packets."""
-import six
 import struct
-from weakref import WeakKeyDictionary
 
 # SDP header flags
 FLAG_REPLY = 0x87
 FLAG_NO_REPLY = 0x07
 
 
-class RangedIntAttribute(object):
-    """Descriptor that ensures values fit within a range of values."""
-    def __init__(self, minimum, maximum, min_inclusive=True,
-                 max_inclusive=False, allow_none=False, accept=list()):
-        """Create a new ranged descriptor with specified minimum and maximum
-        values.
-        """
-        if not min_inclusive:
-            minimum += 1  # Convert from [x, y) to (x, y)
-        if max_inclusive:
-            maximum += 1  # Convert from [x, y) to [x, y]
-
-        if not minimum <= maximum:
-            raise ValueError('min should be smaller than max')
-
-        self.accept = accept[:]
-        self.default = minimum
-        self.min = minimum
-        self.max = maximum
-        self.data = WeakKeyDictionary()
-        self.allow_none = allow_none
-
-    def __get__(self, instance, owner):
-        # Get the value, or the default
-        return self.data.get(instance, self.default)
-
-    def __set__(self, instance, value):
-        if value is not None:
-            # Check that min <= value < max
-            if not isinstance(value, six.integer_types):
-                raise TypeError("Value should be an integer: {!s}"
-                                .format(value))
-            if not self.min <= value < self.max and value not in self.accept:
-                raise ValueError("Value outside range {}: [{} to {})"
-                                 .format(value, self.min, self.max))
-            self.data[instance] = value
-        else:
-            if self.allow_none:
-                self.data[instance] = None
-            else:
-                raise ValueError("Value may not be None")
-
-
-class ByteStringAttribute(object):
-    """Descriptor that ensures values are bytestrings of the correct length."""
-    def __init__(self, default=b'', max_length=None):
-        self.max_length = max_length
-        self.default = default
-        self.data = WeakKeyDictionary()
-
-    def __get__(self, instance, owner):
-        return self.data.get(instance, self.default)
-
-    def __set__(self, instance, value):
-        if self.max_length is not None and len(value) > self.max_length:
-            raise ValueError(
-                "Byte string is too long: should be less than {} bytes"
-                .format(self.max_length)
-            )
-        self.data[instance] = value
-
-
 class SDPPacket(object):
     """An SDP Packet"""
-    tag = RangedIntAttribute(0, 256)
-    dest_port = RangedIntAttribute(0, 8)
-    dest_cpu = RangedIntAttribute(0, 18, accept=[31])  # For IPtags
-    src_port = RangedIntAttribute(0, 8)
-    src_cpu = RangedIntAttribute(0, 18, accept=[31])
-    dest_x = RangedIntAttribute(0, 256)
-    dest_y = RangedIntAttribute(0, 256)
-    src_x = RangedIntAttribute(0, 256)
-    src_y = RangedIntAttribute(0, 256)
-    data = ByteStringAttribute()
+    __slots__ = ["reply_expected", "tag", "dest_port", "dest_cpu", "src_port",
+                 "src_cpu", "dest_x", "dest_y", "src_x", "src_y", "data"]
 
     def __init__(self, reply_expected, tag, dest_port, dest_cpu, src_port,
                  src_cpu, dest_x, dest_y, src_x, src_y, data):
@@ -185,15 +113,7 @@ class SDPPacket(object):
 
 class SCPPacket(SDPPacket):
     """An SCP Packet"""
-    cmd_rc = RangedIntAttribute(0, 0xFFFF, max_inclusive=True)
-    seq = RangedIntAttribute(0, 0xFFFF, max_inclusive=True)
-    arg1 = RangedIntAttribute(0, 0xFFFFFFFF, max_inclusive=True,
-                              allow_none=True)
-    arg2 = RangedIntAttribute(0, 0xFFFFFFFF, max_inclusive=True,
-                              allow_none=True)
-    arg3 = RangedIntAttribute(0, 0xFFFFFFFF, max_inclusive=True,
-                              allow_none=True)
-    data = ByteStringAttribute(max_length=256)
+    __slots__ = ["cmd_rc", "seq", "arg1", "arg2", "arg3"]
 
     def __init__(self, reply_expected, tag, dest_port, dest_cpu, src_port,
                  src_cpu, dest_x, dest_y, src_x, src_y, cmd_rc, seq, arg1,

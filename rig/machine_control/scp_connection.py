@@ -1,7 +1,30 @@
 """A blocking implementation of the SCP protocol.
 """
+import collections
+import functools
+import itertools
+import six
 import socket
+import struct
+import time
 from . import consts, packets
+
+
+class scpcall(collections.namedtuple("_scpcall", "x, y, p, cmd, arg1, arg2, "
+                                                 "arg3, data, expected_args, "
+                                                 "callback")):
+    """Utility for constructing SCP packets."""
+    def __new__(cls, x, y, p, cmd, arg1=0, arg2=0, arg3=0, data=b'',
+                expected_args=3, callback=lambda p: None):
+        return super(scpcall, cls).__new__(cls, x, y, p, cmd, arg1, arg2, arg3,
+                                           data, expected_args, callback)
+
+    @property
+    def positional(self):
+        """Get positional arguments as a list."""
+        return (self.x, self.y, self.p, self.cmd,
+                self.arg1, self.arg2, self.arg3, self.data,
+                self.expected_args)
 
 
 class SCPConnection(object):
@@ -36,8 +59,8 @@ class SCPConnection(object):
         # Store the number of tries that will be allowed
         self.n_tries = n_tries
 
-        # The current seq value
-        self._seq = 0
+        # Sequence values
+        self.seq = seqs()
 
     @classmethod
     def _register_error(cls, cmd_rc):
@@ -82,10 +105,11 @@ class SCPConnection(object):
         self.sock.settimeout(self.default_timeout + timeout)
 
         # Construct the packet that will be sent
+        seq = next(self.seq)
         packet = packets.SCPPacket(
             reply_expected=True, tag=0xff, dest_port=0, dest_cpu=p,
             src_port=7, src_cpu=31, dest_x=x, dest_y=y, src_x=0, src_y=0,
-            cmd_rc=cmd, seq=self._seq, arg1=arg1, arg2=arg2, arg3=arg3,
+            cmd_rc=cmd, seq=seq, arg1=arg1, arg2=arg2, arg3=arg3,
             data=data
         )
 
@@ -125,10 +149,8 @@ class SCPConnection(object):
                     )
                 )
 
-            if scp.seq == self._seq:
-                # The packet is the acknowledgement.  Increment the
-                # sequence indicator and return the packet.
-                self._seq ^= 1
+            if scp.seq == seq:
+                # The packet is the acknowledgement.
                 return scp
 
         # The packet we transmitted wasn't acknowledged.
@@ -137,7 +159,124 @@ class SCPConnection(object):
                 self.n_tries)
         )
 
-    def read(self, buffer_size, x, y, p, address, length_bytes):
+    def send_scp_burst(self, buffer_size, window_size,
+                       parameters_and_callbacks):
+        """Send a burst of SCP packets and call a callback for each returned
+        packet.
+
+        Parameters
+        ----------
+        buffer_size : int
+            Number of bytes held in an SCP buffer by SARK, determines how many
+            bytes will be expected in a socket.
+        window_size : int
+            Number of packets which can be awaiting replies from the SpiNNaker
+            board.
+        parameters_and_callbacks: iterable of :py:class:`.scpcall`
+            Iterable of :py:class:`.scpcall` elements.  These elements can
+            specify a callback which will be called with the returned packet.
+        """
+        # Non-blocking and then the following is a busy loop.
+        self.sock.setblocking(False)
+
+        # Calculate the receive length, this should be the smallest power of
+        # two greater than the required size
+        max_length = buffer_size + consts.SDP_HEADER_LENGTH
+        receive_length = 1 << 9  # 512 bytes is a reasonable minimum
+        while receive_length < max_length:
+            receive_length <<= 1
+
+        class TransmittedPacket(object):
+            """A packet which has been transmitted and still awaits a response.
+            """
+            __slots__ = ["callback", "packet", "expected_args", "n_tries",
+                         "time_sent"]
+
+            def __init__(self, callback, packet, expected_args):
+                self.callback = callback
+                self.packet = packet
+                self.expected_args = expected_args
+                self.n_tries = 1
+                self.time_sent = time.time()
+
+        queued_packets = True
+        outstanding_packets = {}
+
+        # While there are packets in the queue or packets for which we are
+        # still awaiting returns then continue to loop.
+        while queued_packets or outstanding_packets:
+            # If there are fewer outstanding packets than the window can take
+            # then transmit a packet and add it to the list of outstanding
+            # packets.
+            if len(outstanding_packets) < window_size:
+                try:
+                    args = next(parameters_and_callbacks)
+                except StopIteration:
+                    queued_packets = False
+
+                if queued_packets:
+                    # If we extracted a new packet to extend create the
+                    # outstanding packet and transmit it.
+                    seq = next(self.seq)
+                    packet = packets.SCPPacket(
+                        reply_expected=True, tag=0xff, dest_port=0,
+                        dest_cpu=args.p, src_port=7, src_cpu=31,
+                        dest_x=args.x, dest_y=args.y, src_x=0, src_y=0,
+                        cmd_rc=args.cmd, seq=seq,
+                        arg1=args.arg1, arg2=args.arg2, arg3=args.arg3,
+                        data=args.data
+                    )
+                    outstanding = TransmittedPacket(
+                        args.callback, packet.bytestring, args.expected_args)
+                    outstanding_packets[seq] = outstanding
+                    self.sock.send(b"\x00\x00" + packet.bytestring)
+
+            # Listen on the socket for an acknowledgement packet, there not be
+            # one.
+            try:
+                ack = self.sock.recv(receive_length)
+            except IOError:
+                # There wasn't a returned packet, we may spend quite some time
+                # here.
+                ack = None
+
+            # Process the received packet (if there is one)
+            if ack is not None:
+                # Extract the sequence number from the bytestring, iff possible
+                seq_bytes = ack[2 + consts.SDP_HEADER_LENGTH + 2:
+                                2 + consts.SDP_HEADER_LENGTH + 2 + 2]
+                seq, = struct.unpack("<H", seq_bytes)
+                ack_packet = packets.SCPPacket.from_bytestring(ack[2:])
+                assert ack_packet.seq == seq
+
+                # Look up the sequence index of packet in the list of
+                # outstanding packets.  We may have already processed a
+                # response for this packet (indicating that the response was
+                # delayed and we retransmitted the initial message) in which
+                # case we can silently ignore the returned packet.
+                outstanding = outstanding_packets.pop(seq, None)
+                if outstanding is not None:
+                    ack_packet = packets.SCPPacket.from_bytestring(
+                        ack[2:], n_args=outstanding.expected_args)
+                    outstanding.callback(ack_packet)
+
+            # Look through all the remaining outstanding packets, if any of
+            # them have timed out then we retransmit them.
+            current_time = time.time()
+            for seq, outstanding in six.iteritems(outstanding_packets):
+                if current_time - outstanding.time_sent > self.default_timeout:
+                    # This packet has timed out, if we have sent it more than
+                    # the given number of times then raise a timeout error for
+                    # it.
+                    if outstanding.n_tries >= self.n_tries:
+                        raise TimeoutError(self.n_tries)
+
+                    # Otherwise we retransmit it
+                    self.sock.send(b"\x00\x00" + outstanding.packet)
+                    outstanding.n_tries += 1
+                    outstanding.time_sent = current_time
+
+    def read(self, buffer_size, window_size, x, y, p, address, length_bytes):
         """Read a bytestring from an address in memory.
 
         Parameters
@@ -145,6 +284,7 @@ class SCPConnection(object):
         buffer_size : int
             Number of bytes held in an SCP buffer by SARK, determines how many
             bytes will be expected in a socket.
+        window_size : int
         x : int
         y : int
         p : int
@@ -161,31 +301,41 @@ class SCPConnection(object):
         """
         # Prepare the buffer to receive the incoming data
         data = bytearray(length_bytes)
+        mem = memoryview(data)
 
-        # Request data until all data has been received
-        offset = 0
-        while length_bytes > 0:
-            # Get the next block of data
-            block_size = min((length_bytes, buffer_size))
-            read_address = address + offset
-            dtype = consts.address_length_dtype[(read_address % 4,
-                                                 block_size % 4)]
+        # Create a generator that will generate request packets and store data
+        # until all data has been returned
+        def packets(length_bytes, data):
+            offset = 0
+            while length_bytes > 0:
+                # Get the next block of data
+                block_size = min((length_bytes, buffer_size))
+                read_address = address + offset
+                dtype = consts.address_length_dtype[(read_address % 4,
+                                                     block_size % 4)]
 
-            # Send the SCP packet to request the data
-            block_data = self.send_scp(
-                buffer_size, x, y, p, consts.SCPCommands.read,
-                read_address, block_size, dtype, expected_args=0
-            )
+                # Create the callback to save data back into the buffer
+                def callback(offset, block_size, block_data):
+                    mem[offset:offset + block_size] = \
+                        block_data.data[:block_size]
 
-            # Save the data to the buffer, update the number of bytes remaining
-            # and the offset
-            data[offset:offset + block_size] = block_data.data
-            offset += block_size
-            length_bytes -= block_size
+                # Create the call spec and yield
+                yield scpcall(
+                    x, y, p, consts.SCPCommands.read, read_address,
+                    block_size, dtype, expected_args=0,
+                    callback=functools.partial(callback, offset, block_size)
+                )
 
+                # Update the number of bytes remaining and the offset
+                offset += block_size
+                length_bytes -= block_size
+
+        # Run the event loop and then return the retrieved data
+        self.send_scp_burst(buffer_size, window_size,
+                            packets(length_bytes, data))
         return bytes(data)
 
-    def write(self, buffer_size, x, y, p, address, data):
+    def write(self, buffer_size, window_size, x, y, p, address, data):
         """Write a bytestring to an address in memory.
 
         Parameters
@@ -207,19 +357,31 @@ class SCPConnection(object):
         # While there is still data perform a write: get the block to write
         # this time around, determine the data type, perform the write and
         # increment the address
-        end = len(data)
-        pos = 0
-        while pos < end:
-            block = data[pos:pos + buffer_size]
-            block_size = len(block)
+        def packets(address, data):
+            end = len(data)
+            pos = 0
+            while pos < end:
+                block = data[pos:pos + buffer_size]
+                block_size = len(block)
 
-            dtype = consts.address_length_dtype[(address % 4, block_size % 4)]
+                dtype = consts.address_length_dtype[(address % 4,
+                                                     block_size % 4)]
 
-            self.send_scp(buffer_size, x, y, p, consts.SCPCommands.write,
-                          address, block_size, dtype, block)
+                yield scpcall(x, y, p, consts.SCPCommands.write, address,
+                              block_size, dtype, block)
 
-            address += block_size
-            pos += block_size
+                address += block_size
+                pos += block_size
+
+        # Run the event loop and then return the retrieved data
+        self.send_scp_burst(buffer_size, window_size, packets(address, data))
+
+
+def seqs(mask=0xf):
+    i = 0
+    while True:
+        yield i
+        i = (i + 1) & mask
 
 
 class SCPError(IOError):

@@ -42,22 +42,6 @@ def cn():
 
 
 @pytest.fixture
-def controller_rw_mock():
-    """Create a controller with mock _read and _write methods."""
-    cn = MachineController("localhost")
-    cn._read = mock.Mock(spec_set=[])
-    cn._write = mock.Mock(spec_set=[])
-    cn._scp_data_length = 256
-
-    def read_mock(x, y, p, address, length_bytes, data_type=DataType.byte):
-        return b'\x00' * length_bytes
-
-    cn._read.side_effect = read_mock
-
-    return cn
-
-
-@pytest.fixture
 def mock_controller():
     cn = mock.Mock(spec=MachineController)
     return cn

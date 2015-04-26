@@ -2,6 +2,7 @@
 """
 import collections
 import functools
+import math
 import six
 import socket
 import struct
@@ -181,9 +182,7 @@ class SCPConnection(object):
         # Calculate the receive length, this should be the smallest power of
         # two greater than the required size
         max_length = buffer_size + consts.SDP_HEADER_LENGTH
-        receive_length = 1 << 9  # 512 bytes is a reasonable minimum
-        while receive_length < max_length:
-            receive_length <<= 1
+        receive_length = 2**math.ceil(math.log(max_length, 2))
 
         class TransmittedPacket(object):
             """A packet which has been transmitted and still awaits a response.
@@ -217,6 +216,9 @@ class SCPConnection(object):
                     # If we extracted a new packet to extend create the
                     # outstanding packet and transmit it.
                     seq = next(self.seq)
+                    while seq in outstanding_packets:
+                        seq = next(self.seq)
+
                     packet = packets.SCPPacket(
                         reply_expected=True, tag=0xff, dest_port=0,
                         dest_cpu=args.p, src_port=7, src_cpu=31,

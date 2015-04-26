@@ -143,7 +143,7 @@ def test_errors(mock_conn, rc, error):
 class TestBursts(object):
     """Tests for transmitting bursts of SCP packets."""
     @pytest.mark.parametrize("buffer_size, receive_length",
-                             [(128, 512), (509, 1024)])
+                             [(128, 256), (509, 1024)])
     def test_single_packet(self, mock_conn, buffer_size, receive_length):
         """Test correct operation for transmitting and receiving a single
         packet.

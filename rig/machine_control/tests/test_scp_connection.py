@@ -1,6 +1,5 @@
 import collections
 import mock
-from mock import call
 import pytest
 import struct
 import time
@@ -45,99 +44,43 @@ def test_scpcall():
     assert call.arg1 == call.arg2 == call.arg3 == 0
     assert call.data == b''
     assert call.expected_args == 3
+    assert call.timeout == 0.0
     assert isinstance(call.callback, collections.Callable)
 
-    assert call.positional == (call.x, call.y, call.p, call.cmd,
-                               call.arg1, call.arg2, call.arg3, call.data,
-                               call.expected_args)
 
+def test_single_scp_packet(mock_conn):
+    # Replace send_scp_burst with a mock
+    mock_conn.send_scp_burst = mock.Mock()
+    packet = mock.Mock(name="packet")
 
-@pytest.mark.parametrize("bufsize, recv_size", [(232, 512), (256, 512),
-                                                (248, 512), (504, 512),
-                                                (514, 1024)])
-def test_success(mock_conn, bufsize, recv_size):
-    """Test successfully transmitting and receiving, where the seq of the first
-    returned packet is wrong.
-    """
-    # Generate the return packet
-    class ReturnPacket(object):
-        def __init__(self):
-            self.d = False
+    def send_burst(buffer_size, window_size, args):
+        assert buffer_size == 512
+        assert window_size == 1
 
-        def __call__(self, last):
-            if not self.d:
-                self.d = True
+        # Call the callback
+        for i, arg in enumerate(args):
+            assert i == 0  # Only one packet to send
+            assert isinstance(arg, scpcall)
+            assert arg.x == 0
+            assert arg.y == 1
+            assert arg.p == 2
+            assert arg.cmd == 3
+            assert arg.arg1 == 4
+            assert arg.arg2 == 5
+            assert arg.arg3 == 6
+            assert arg.data == b'Hello'
+            assert arg.expected_args == 1
+            assert arg.timeout == 0.1
+            arg.callback(packet)
 
-                # Change the sequence value
-                pkg = SCPPacket.from_bytestring(last)
-                pkg.seq += 1
-                return pkg.bytestring
-            else:
-                return last
+    mock_conn.send_scp_burst.side_effect = send_burst
 
-    sr = SendReceive(ReturnPacket())
+    # Send a single SCP packet, ensure these arguments are just passed with a
+    # window_size of 1 to send_scp_burst.
+    assert (mock_conn.send_scp(512, 0, 1, 2, 3, 4, 5, 6, b'Hello', 1, 0.1) is
+            packet)
 
-    # Set up the mock connections
-    mock_conn.sock.send.side_effect = sr.send
-    mock_conn.sock.recv.side_effect = sr.recv
-
-    # Send and receive
-    recvd = mock_conn.send_scp(bufsize, 1, 2, 3, 4, 5, 6, 7, b'\x08')
-    assert isinstance(recvd, SCPPacket)
-
-    # Check that the transmitted packet was sane, and that only two packets
-    # were transmitted (because the first was acknowledged with an incorrect
-    # sequence number).  Also assert that there were only 2 calls to recv and
-    # that they were of the correct size.
-    assert mock_conn.sock.send.call_count == 2
-    mock_conn.sock.recv.assert_has_calls([call(recv_size)] * 2)
-    transmitted = SCPPacket.from_bytestring(sr.last_seen)
-    assert transmitted.dest_x == recvd.dest_x == 1
-    assert transmitted.dest_y == recvd.dest_y == 2
-    assert transmitted.dest_cpu == recvd.dest_cpu == 3
-    assert transmitted.cmd_rc == recvd.cmd_rc == 4
-    assert transmitted.arg1 == recvd.arg1 == 5
-    assert transmitted.arg2 == recvd.arg2 == 6
-    assert transmitted.arg3 == recvd.arg3 == 7
-    assert transmitted.data == recvd.data == b'\x08'
-
-
-@pytest.mark.parametrize("n_tries", [5, 2])
-def test_retries(mock_conn, n_tries):
-    mock_conn.sock.recv.side_effect = IOError
-    mock_conn.n_tries = n_tries
-
-    # Send an SCP command and check that an error is raised
-    with pytest.raises(scp_connection.TimeoutError):
-        mock_conn.send_scp(256, 0, 0, 0, 0)
-
-    # Check that n attempts were made
-    assert mock_conn.sock.send.call_count == n_tries
-
-
-@pytest.mark.parametrize(
-    "rc, error",
-    [(0x81, scp_connection.BadPacketLengthError),
-     (0x83, scp_connection.InvalidCommandError),
-     (0x84, scp_connection.InvalidArgsError),
-     (0x87, scp_connection.NoRouteError)])
-def test_errors(mock_conn, rc, error):
-    """Test that errors are raised when error RCs are returned."""
-    def return_packet(last):
-        packet = SCPPacket.from_bytestring(last)
-        packet.cmd_rc = rc
-        return packet.bytestring
-
-    sr = SendReceive(return_packet)
-    mock_conn.sock.send.side_effect = sr.send
-    mock_conn.sock.recv.side_effect = sr.recv
-
-    # Send an SCP command and check that the correct error is raised
-    with pytest.raises(error):
-        mock_conn.send_scp(256, 0, 0, 0, 0)
-
-    assert mock_conn.sock.send.call_count == 1
-    assert mock_conn.sock.recv.call_count == 1
+    assert mock_conn.send_scp_burst.call_count == 1
 
 
 class TestBursts(object):
@@ -152,7 +95,7 @@ class TestBursts(object):
 
         def packets():
             # Yield a single packet, with a callback
-            yield scpcall(3, 5, 0, 12, callback=callback)
+            yield scpcall(3, 5, 0, 12, callback=callback, expected_args=0)
 
         sent_packet = SCPPacket(
             True, 0xff, 0, 0, 7, 31, 3, 5, 0, 0, 12, 0, 0, 0, 0, b'')
@@ -193,6 +136,9 @@ class TestBursts(object):
         assert callback.call_count == 1
         assert (callback.call_args[0][0].bytestring ==
                 return_packet.packet.bytestring)
+        assert callback.call_args[0][0].arg1 is None  # 0 args expected
+        assert callback.call_args[0][0].arg2 is None
+        assert callback.call_args[0][0].arg3 is None
 
     def test_single_packet_times_out(self, mock_conn):
         """Test correct operation for transmitting a single packet which is
@@ -220,6 +166,110 @@ class TestBursts(object):
         # times we specified.
         assert mock_conn.sock.send.call_count == mock_conn.n_tries
         assert mock_conn.sock.recv.called
+
+    def test_single_packet_times_out_with_extended_timeout(self, mock_conn):
+        """Test correct operation for transmitting a single packet which is
+        never acknowledged.
+        """
+        def packets():
+            # Yield a single packet
+            yield scpcall(3, 5, 0, 12, timeout=0.1)
+
+        # The socket will always return with an IOError, so the packet is never
+        # acknowledged.
+        mock_conn.sock.recv.side_effect = IOError
+
+        # Send the bursty packet, assert that it was sent for as many times as
+        # specified.
+        start = time.time()
+        with pytest.raises(scp_connection.TimeoutError):
+            mock_conn.send_scp_burst(512, 8, packets())
+        fail_time = time.time() - start
+
+        # Failing to transmit should take some time
+        assert (fail_time >=
+                mock_conn.n_tries * (mock_conn.default_timeout + 0.1))
+
+        # We shouldn't have transmitted the packet more than the number of
+        # times we specified.
+        assert mock_conn.sock.send.call_count == mock_conn.n_tries
+        assert mock_conn.sock.recv.called
+
+    def test_seq_not_reused_for_outstanding_packet(self, mock_conn):
+        """Test that a sequence index is never reused for a packet which
+        receives no acknowledgement.
+        """
+        def packets():
+            # Yield a single packet which we refuse to acknowledge (should have
+            # seq==0)
+            yield scpcall(0, 0, 0, 12)
+
+            # Yield a large number of obviously different packets, the seq
+            # (==0) should never be used for any of these.
+            for _ in range(1000):
+                yield scpcall(0, 0, 0, 2)
+
+        # Create a mock socket object which will reply with a valid packet for
+        # everything BUT seq==0
+        class ReturnPacket(object):
+            def __init__(self):
+                self.ignore_seq = None
+                self.called = False
+
+            def __call__(self, packet):
+                packet = SCPPacket.from_bytestring(packet)
+
+                if self.ignore_seq is None:
+                    self.ignore_seq = packet.seq
+
+                if packet.seq == self.ignore_seq:
+                    assert packet.cmd_rc == 12
+                    raise IOError  # No packet to return
+                else:
+                    packet.cmd_rc = 0
+                    return packet.bytestring
+
+        return_packet = ReturnPacket()
+        sr = SendReceive(return_packet)
+        mock_conn.seq = scp_connection.seqs(0x1)
+        mock_conn.sock.send.side_effect = sr.send
+        mock_conn.sock.recv.side_effect = sr.recv
+
+        # Send the packets, the one packet we refuse to ignore should timeout
+        with pytest.raises(scp_connection.TimeoutError):
+            mock_conn.send_scp_burst(512, 8, packets())
+
+    @pytest.mark.parametrize(
+        "rc, error",
+        [(0x81, scp_connection.BadPacketLengthError),
+         (0x83, scp_connection.InvalidCommandError),
+         (0x84, scp_connection.InvalidArgsError),
+         (0x87, scp_connection.NoRouteError)])
+    def test_errors(self, mock_conn, rc, error):
+        """Test that errors are raised when error RCs are returned."""
+        # Create an object which returns a packet with an error code
+        class ReturnPacket(object):
+            def __init__(self):
+                self.packet = None
+
+            def __call__(self, packet):
+                self.packet = SCPPacket.from_bytestring(packet)
+                self.packet.cmd_rc = rc
+                self.packet.arg1 = None
+                self.packet.arg2 = None
+                self.packet.arg3 = None
+                self.packet.data = b''
+                return self.packet.bytestring
+
+        return_packet = ReturnPacket()
+        sr = SendReceive(return_packet)
+        mock_conn.sock.send.side_effect = sr.send
+        mock_conn.sock.recv.side_effect = sr.recv
+
+        # Send an SCP command and check that the correct error is raised
+        packets = [scpcall(3, 5, 0, 12)]
+        with pytest.raises(error):
+            mock_conn.send_scp_burst(256, 1, iter(packets))
 
     @pytest.mark.parametrize("window_size, n_tries", [(10, 2), (8, 5)])
     def test_fills_window(self, mock_conn, window_size, n_tries):
@@ -296,6 +346,13 @@ def test_read(buffer_size, window_size, x, y, p, n_bytes,
 
             def __call__(self, buffer_size, window_size, args):
                 for i, arg in enumerate(args):
+                    assert arg.x == x and arg.y == y and arg.p == p
+                    assert arg.cmd == SCPCommands.read
+                    assert arg.arg1 == offsets[i]
+                    assert arg.arg2 == lens[i]
+                    assert arg.arg3 == data_type
+                    assert arg.expected_args == 0
+
                     mock_packet = mock.Mock(spec_set=['data'])
                     mock_packet.data = struct.pack("B", i) * arg.arg2
                     self.read_data += mock_packet.data
@@ -315,15 +372,6 @@ def test_read(buffer_size, window_size, x, y, p, n_bytes,
     assert send_scp_burst.call_count == 1
     assert send_scp_burst.call_args[0][0] == buffer_size
     assert send_scp_burst.call_args[0][1] == window_size
-    pars_calls = send_scp_burst.call_args[0][2]
-
-    for args, length, offset in zip(pars_calls, lens, offsets):
-        assert args.x == x and args.y == y and args.p == p
-        assert args.cmd == SCPCommands.read
-        assert args.arg1 == offset
-        assert args.arg2 == length
-        assert args.arg3 == data_type
-        assert args.expected_args == 0
 
 
 @pytest.mark.parametrize(

@@ -12,19 +12,41 @@ from . import consts, packets
 
 class scpcall(collections.namedtuple("_scpcall", "x, y, p, cmd, arg1, arg2, "
                                                  "arg3, data, expected_args, "
-                                                 "callback")):
-    """Utility for constructing SCP packets."""
-    def __new__(cls, x, y, p, cmd, arg1=0, arg2=0, arg3=0, data=b'',
-                expected_args=3, callback=lambda p: None):
-        return super(scpcall, cls).__new__(cls, x, y, p, cmd, arg1, arg2, arg3,
-                                           data, expected_args, callback)
+                                                 "callback, timeout")):
+    """Utility for specifying SCP packets which will be sent using
+    :py:meth:`~.SCPConnection.send_scp_burst` and their callbacks.
 
-    @property
-    def positional(self):
-        """Get positional arguments as a list."""
-        return (self.x, self.y, self.p, self.cmd,
-                self.arg1, self.arg2, self.arg3, self.data,
-                self.expected_args)
+    ..note::
+        The parameters are similar to the parameters for
+        :py:class:`~.SCPConnection.send_scp` but for the addition of `callback`
+        between `expected_args` and `timeout`.
+
+    Attributes
+    ----------
+    x : int
+    y : int
+    p : int
+    cmd : int
+    arg1 : int
+    arg2 : int
+    arg3 : int
+    data : bytes
+    expected_args : int
+        The number of arguments (0-3) that are expected in the returned
+        packet.
+    callback : function
+        Function which will be called with the packet that acknowledges the
+        transmission of this packet.
+    timeout : float
+        Additional timeout in seconds to wait for a reply on top of the
+        default specified upon instantiation.
+    """
+    def __new__(cls, x, y, p, cmd, arg1=0, arg2=0, arg3=0, data=b'',
+                expected_args=3, callback=lambda p: None, timeout=0.0):
+        return super(scpcall, cls).__new__(
+            cls, x, y, p, cmd, arg1, arg2, arg3, data, expected_args, callback,
+            timeout
+        )
 
 
 class SCPConnection(object):
@@ -102,62 +124,29 @@ class SCPConnection(object):
             The packet that was received in acknowledgement of the transmitted
             packet.
         """
-        self.sock.settimeout(self.default_timeout + timeout)
+        # This is implemented as a single burst packet sent using the bursty
+        # interface.  This significantly reduces code duplication.
+        # Construct a callable to retain the returned packet for us
+        class Callback(object):
+            def __init__(self):
+                self.packet = None
 
-        # Construct the packet that will be sent
-        seq = next(self.seq)
-        packet = packets.SCPPacket(
-            reply_expected=True, tag=0xff, dest_port=0, dest_cpu=p,
-            src_port=7, src_cpu=31, dest_x=x, dest_y=y, src_x=0, src_y=0,
-            cmd_rc=cmd, seq=seq, arg1=arg1, arg2=arg2, arg3=arg3,
-            data=data
-        )
+            def __call__(self, packet):
+                self.packet = packet
 
-        # Determine how many bytes to listen to on the socket, this should
-        # be the smallest power of two greater than the required size (for
-        # efficiency reasons).
-        max_length = buffer_size + consts.SDP_HEADER_LENGTH
-        receive_length = 1 << 9  # 512 bytes is a reasonable minimum
-        while receive_length < max_length:
-            receive_length <<= 1
+        # Create the packet to send
+        callback = Callback()
+        packets = [
+            scpcall(x, y, p, cmd, arg1, arg2, arg3, data, expected_args,
+                    callback, timeout)
+        ]
 
-        # Repeat until a reply is received or we run out of tries.
-        n_tries = 0
-        while n_tries < self.n_tries:
-            # Transit the packet
-            self.sock.send(packet.bytestring)
-            n_tries += 1
+        # Send the burst
+        self.send_scp_burst(buffer_size, 1, iter(packets))
 
-            try:
-                # Try to receive the returned acknowledgement
-                ack = self.sock.recv(receive_length)
-            except IOError:
-                # There was nothing to receive from the socket
-                continue
-
-            # Convert the possible returned packet into an SCP packet. If
-            # the sequence number matches the expected sequence number then
-            # the acknowledgement has been received.
-            scp = packets.SCPPacket.from_bytestring(ack, n_args=expected_args)
-
-            # Check that the CMD_RC isn't an error
-            if scp.cmd_rc in self.error_codes:
-                raise self.error_codes[scp.cmd_rc](
-                    "Packet with arguments: cmd={}, arg1={}, arg2={}, "
-                    "arg3={}; sent to core ({},{},{}) was bad.".format(
-                        cmd, arg1, arg2, arg3, x, y, p
-                    )
-                )
-
-            if scp.seq == seq:
-                # The packet is the acknowledgement.
-                return scp
-
-        # The packet we transmitted wasn't acknowledged.
-        raise TimeoutError(
-            "Exceeded {} tries when trying to transmit packet.".format(
-                self.n_tries)
-        )
+        # Return the received packet
+        assert callback.packet is not None
+        return callback.packet
 
     def send_scp_burst(self, buffer_size, window_size,
                        parameters_and_callbacks):
@@ -182,18 +171,19 @@ class SCPConnection(object):
         # Calculate the receive length, this should be the smallest power of
         # two greater than the required size
         max_length = buffer_size + consts.SDP_HEADER_LENGTH
-        receive_length = 2**math.ceil(math.log(max_length, 2))
+        receive_length = int(2**math.ceil(math.log(max_length, 2)))
 
         class TransmittedPacket(object):
             """A packet which has been transmitted and still awaits a response.
             """
             __slots__ = ["callback", "packet", "expected_args", "n_tries",
-                         "time_sent"]
+                         "time_sent", "extra_timeout"]
 
-            def __init__(self, callback, packet, expected_args):
+            def __init__(self, callback, packet, expected_args, extra_timeout):
                 self.callback = callback
                 self.packet = packet
                 self.expected_args = expected_args
+                self.extra_timeout = extra_timeout
                 self.n_tries = 1
                 self.time_sent = time.time()
 
@@ -204,8 +194,8 @@ class SCPConnection(object):
         # still awaiting returns then continue to loop.
         while queued_packets or outstanding_packets:
             # If there are fewer outstanding packets than the window can take
-            # then transmit a packet and add it to the list of outstanding
-            # packets.
+            # and we still might have packets left to send then transmit a
+            # packet and add it to the list of outstanding packets.
             if len(outstanding_packets) < window_size and queued_packets:
                 try:
                     args = next(parameters_and_callbacks)
@@ -213,12 +203,17 @@ class SCPConnection(object):
                     queued_packets = False
 
                 if queued_packets:
-                    # If we extracted a new packet to extend create the
+                    # If we extracted a new packet to send then create a new
                     # outstanding packet and transmit it.
                     seq = next(self.seq)
                     while seq in outstanding_packets:
+                        # The seq should rarely be already taken, it normally
+                        # means that one packet is taking such a long time to
+                        # send that the sequence has wrapped around.  It's not
+                        # a problem provided that we don't reuse the number.
                         seq = next(self.seq)
 
+                    # Construct the packet that we'll be sending
                     packet = packets.SCPPacket(
                         reply_expected=True, tag=0xff, dest_port=0,
                         dest_cpu=args.p, src_port=7, src_cpu=31,
@@ -227,9 +222,16 @@ class SCPConnection(object):
                         arg1=args.arg1, arg2=args.arg2, arg3=args.arg3,
                         data=args.data
                     )
-                    outstanding = TransmittedPacket(
-                        args.callback, packet.bytestring, args.expected_args)
-                    outstanding_packets[seq] = outstanding
+
+                    # Create a reference to this packet so that we know we're
+                    # expecting a response for it and can retransmit it if
+                    # necessary.
+                    outstanding_packets[seq] = TransmittedPacket(
+                        args.callback, packet.bytestring, args.expected_args,
+                        args.timeout
+                    )
+
+                    # Actually send the packet
                     self.sock.send(packet.bytestring)
 
             # Listen on the socket for an acknowledgement packet, there not be
@@ -248,11 +250,18 @@ class SCPConnection(object):
                                 2 + consts.SDP_HEADER_LENGTH + 4]
                 rc, seq = struct.unpack("<2H", seq_bytes)
 
+                # If the code is an error then we respond immediately
+                if rc in self.error_codes:
+                    raise self.error_codes[rc]
+
                 # Look up the sequence index of packet in the list of
                 # outstanding packets.  We may have already processed a
                 # response for this packet (indicating that the response was
                 # delayed and we retransmitted the initial message) in which
                 # case we can silently ignore the returned packet.
+                # XXX: There is a danger that a response was so delayed that we
+                # already reused the seq number... this is probably
+                # sufficiently unlikely that there is no problem.
                 outstanding = outstanding_packets.pop(seq, None)
                 if outstanding is not None:
                     ack_packet = packets.SCPPacket.from_bytestring(
@@ -264,7 +273,8 @@ class SCPConnection(object):
             # them have timed out then we retransmit them.
             current_time = time.time()
             for seq, outstanding in six.iteritems(outstanding_packets):
-                if current_time - outstanding.time_sent > self.default_timeout:
+                if (current_time - outstanding.time_sent >
+                        self.default_timeout + outstanding.extra_timeout):
                     # This packet has timed out, if we have sent it more than
                     # the given number of times then raise a timeout error for
                     # it.

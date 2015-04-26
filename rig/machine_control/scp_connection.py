@@ -101,7 +101,7 @@ class SCPConnection(object):
         n_tries = 0
         while n_tries < self.n_tries:
             # Transit the packet
-            self.sock.send(b'\x00\x00' + packet.bytestring)
+            self.sock.send(packet.bytestring)
             n_tries += 1
 
             try:
@@ -114,8 +114,7 @@ class SCPConnection(object):
             # Convert the possible returned packet into an SCP packet. If
             # the sequence number matches the expected sequence number then
             # the acknowledgement has been received.
-            scp = packets.SCPPacket.from_bytestring(ack[2:],
-                                                    n_args=expected_args)
+            scp = packets.SCPPacket.from_bytestring(ack, n_args=expected_args)
 
             # Check that the CMD_RC isn't an error
             if scp.cmd_rc in self.error_codes:

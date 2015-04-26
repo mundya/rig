@@ -17,7 +17,7 @@ class TestSDPPacket(object):
         #     src_x: 0x0F
         #     src_y: 0xF0
         #     data: 0xDEADBEEF
-        packet = b'\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xDE\xAD\xBE\xEF'
+        packet = b'\x00\x00\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xDE\xAD\xBE\xEF'
         sdp_packet = SDPPacket.from_bytestring(packet)
 
         assert isinstance(sdp_packet, SDPPacket)
@@ -41,7 +41,7 @@ class TestSDPPacket(object):
         """Test creating a new SDPPacket from a bytestring."""
         # Create bytestring representing a packet with:
         #     flags: 0x07
-        packet = b'\x07\xf0\xef\xee\xa5\x5a\x0f\xf0\xDE\xAD\xBE\xEF'
+        packet = b'\x00\x00\x07\xf0\xef\xee\xa5\x5a\x0f\xf0\xDE\xAD\xBE\xEF'
         sdp_packet = SDPPacket.from_bytestring(packet)
 
         assert isinstance(sdp_packet, SDPPacket)
@@ -67,7 +67,7 @@ class TestSCPPacket(object):
         #     src_y: 0xF0
         #     cmd_rc: 0xDEAD
         #     seq: 0xBEEF
-        packet = b'\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xAD\xDE\xEF\xBE'
+        packet = b'\x00\x00\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xAD\xDE\xEF\xBE'
         scp_packet = SCPPacket.from_bytestring(packet)
 
         assert isinstance(scp_packet, SCPPacket)
@@ -111,7 +111,8 @@ class TestSCPPacket(object):
         #     arg2: 0xCAFECAFE
         #     arg3: 0x5A5A7B7B
         #     data: 0xFEEDDEAF01
-        packet = b'\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\x5a\xa5\xf0\x0f\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5\xFE\xCA\xFE\xCA\x7B\x7B\x5A\x5A' + \
                  b'\xFE\xED\xDE\xAF\x01'
         scp_packet = SCPPacket.from_bytestring(packet)
@@ -154,7 +155,8 @@ class TestSCPPacket(object):
         #     cmd_rc: 0xDEAD
         #     seq: 0xBEEF
         #     data: 0xA5A5B7B7CAFECAFE5A5A7B7BFEEDDEAF01
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5\xFE\xCA\xFE\xCA\x7B\x7B\x5A\x5A' + \
                  b'\xFE\xED\xDE\xAF\x01'
         scp_packet = SCPPacket.from_bytestring(packet, n_args=0)
@@ -174,7 +176,7 @@ class TestSCPPacket(object):
 
     def test_from_bytestring_0_args_short(self):
         """Test creating a new SCPPacket from a bytestring."""
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE'
+        packet = b'\x00\x00\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE'
         scp_packet = SCPPacket.from_bytestring(packet)
 
         assert scp_packet.arg1 is None
@@ -190,7 +192,8 @@ class TestSCPPacket(object):
         """Test creating a new SCPPacket from a bytestring."""
         #     arg1: 0xA5A5B7B7
         #     data: 0xCAFECAFE5A5A7B7BFEEDDEAF01
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5\xFE\xCA\xFE\xCA\x7B\x7B\x5A\x5A' + \
                  b'\xFE\xED\xDE\xAF\x01'
         scp_packet = SCPPacket.from_bytestring(packet, n_args=1)
@@ -209,7 +212,8 @@ class TestSCPPacket(object):
     def test_from_bytestring_1_args_short(self):
         """Test creating a new SCPPacket from a bytestring."""
         #     arg1: 0xA5A5B7B7
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5'
         scp_packet = SCPPacket.from_bytestring(packet)
 
@@ -227,7 +231,8 @@ class TestSCPPacket(object):
         #     arg1: 0xA5A5B7B7
         #     arg2: 0xCAFECAFE
         #     data: 0x5A5A7B7BFEEDDEAF01
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5\xFE\xCA\xFE\xCA\x7B\x7B\x5A\x5A' + \
                  b'\xFE\xED\xDE\xAF\x01'
         scp_packet = SCPPacket.from_bytestring(packet, n_args=2)
@@ -245,7 +250,8 @@ class TestSCPPacket(object):
         """Test creating a new SCPPacket from a bytestring."""
         #     arg1: 0xA5A5B7B7
         #     arg2: 0xCAFECAFE
-        packet = b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
+        packet = b'\x00\x00' + \
+                 b'\x87\xf0\xef\xee\xa5\x5a\x0f\xf0\xAD\xDE\xEF\xBE' + \
                  b'\xB7\xB7\xA5\xA5\xFE\xCA\xFE\xCA'
         scp_packet = SCPPacket.from_bytestring(packet)
 

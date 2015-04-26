@@ -14,10 +14,10 @@ class SendReceive(object):
         self.return_packet = return_packet
 
     def send(self, packet, *args):
-        self.last_seen = packet[2:]
+        self.last_seen = packet[:]
 
     def recv(self, *args, **kwargs):
-        return b"\x00\x00" + self.return_packet(self.last_seen)
+        return self.return_packet(self.last_seen)
 
 
 @pytest.fixture

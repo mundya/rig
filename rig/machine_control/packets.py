@@ -39,12 +39,12 @@ class SDPPacket(object):
     def unpack_packet(cls, bytestring):
         """Unpack the SDP header from a bytestring."""
         # Extract the header and the data from the packet
-        header = bytestring[0:8]  # First 8 bytes
-        data = bytestring[8:]  # Everything else
+        header = bytestring[0:10]  # First 8+2 bytes
+        data = bytestring[10:]  # Everything else
 
         # Unpack the header
         (flags, tag, dest_cpu_port, src_cpu_port, dest_p2p,
-         src_p2p) = struct.unpack('<4B2H', header)
+         src_p2p) = struct.unpack('<2x4B2H', header)
 
         dest_x = (dest_p2p & 0xff00) >> 8
         dest_y = (dest_p2p & 0x00ff)
@@ -93,7 +93,7 @@ class SDPPacket(object):
 
         # Construct the header
         header = struct.pack(
-            '<4B2H', FLAG_REPLY if self.reply_expected else FLAG_NO_REPLY,
+            '<2x4B2H', FLAG_REPLY if self.reply_expected else FLAG_NO_REPLY,
             self.tag, packed_dest_cpu_port, packed_src_cpu_port,
             dest_p2p, src_p2p
         )

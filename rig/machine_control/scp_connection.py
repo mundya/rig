@@ -2,7 +2,6 @@
 """
 import collections
 import functools
-import itertools
 import six
 import socket
 import struct
@@ -303,6 +302,11 @@ class SCPConnection(object):
         data = bytearray(length_bytes)
         mem = memoryview(data)
 
+        # Create a callback which will write the data from a packet into a
+        # memoryview.
+        def callback(mem, block_data):
+            mem[:] = block_data.data
+
         # Create a generator that will generate request packets and store data
         # until all data has been returned
         def packets(length_bytes, data):
@@ -314,16 +318,12 @@ class SCPConnection(object):
                 dtype = consts.address_length_dtype[(read_address % 4,
                                                      block_size % 4)]
 
-                # Create the callback to save data back into the buffer
-                def callback(offset, block_size, block_data):
-                    mem[offset:offset + block_size] = \
-                        block_data.data[:block_size]
-
                 # Create the call spec and yield
                 yield scpcall(
                     x, y, p, consts.SCPCommands.read, read_address,
                     block_size, dtype, expected_args=0,
-                    callback=functools.partial(callback, offset, block_size)
+                    callback=functools.partial(callback,
+                                               mem[offset:offset + block_size])
                 )
 
                 # Update the number of bytes remaining and the offset

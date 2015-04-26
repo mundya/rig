@@ -244,11 +244,9 @@ class SCPConnection(object):
             # Process the received packet (if there is one)
             if ack is not None:
                 # Extract the sequence number from the bytestring, iff possible
-                seq_bytes = ack[2 + consts.SDP_HEADER_LENGTH + 2:
-                                2 + consts.SDP_HEADER_LENGTH + 2 + 2]
-                seq, = struct.unpack("<H", seq_bytes)
-                ack_packet = packets.SCPPacket.from_bytestring(ack)
-                assert ack_packet.seq == seq
+                seq_bytes = ack[2 + consts.SDP_HEADER_LENGTH:
+                                2 + consts.SDP_HEADER_LENGTH + 4]
+                rc, seq = struct.unpack("<2H", seq_bytes)
 
                 # Look up the sequence index of packet in the list of
                 # outstanding packets.  We may have already processed a

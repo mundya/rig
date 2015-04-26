@@ -230,7 +230,7 @@ class SCPConnection(object):
                     outstanding = TransmittedPacket(
                         args.callback, packet.bytestring, args.expected_args)
                     outstanding_packets[seq] = outstanding
-                    self.sock.send(b"\x00\x00" + packet.bytestring)
+                    self.sock.send(packet.bytestring)
 
             # Listen on the socket for an acknowledgement packet, there not be
             # one.
@@ -247,7 +247,7 @@ class SCPConnection(object):
                 seq_bytes = ack[2 + consts.SDP_HEADER_LENGTH + 2:
                                 2 + consts.SDP_HEADER_LENGTH + 2 + 2]
                 seq, = struct.unpack("<H", seq_bytes)
-                ack_packet = packets.SCPPacket.from_bytestring(ack[2:])
+                ack_packet = packets.SCPPacket.from_bytestring(ack)
                 assert ack_packet.seq == seq
 
                 # Look up the sequence index of packet in the list of
@@ -258,7 +258,8 @@ class SCPConnection(object):
                 outstanding = outstanding_packets.pop(seq, None)
                 if outstanding is not None:
                     ack_packet = packets.SCPPacket.from_bytestring(
-                        ack[2:], n_args=outstanding.expected_args)
+                        ack, n_args=outstanding.expected_args
+                    )
                     outstanding.callback(ack_packet)
 
             # Look through all the remaining outstanding packets, if any of

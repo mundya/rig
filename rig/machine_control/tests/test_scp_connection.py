@@ -187,8 +187,7 @@ class TestBursts(object):
         # the callback was called.
         mock_conn.send_scp_burst(buffer_size, 8, packets())
 
-        mock_conn.sock.send.assert_called_once_with(
-            b'\x00\x00' + sent_packet.bytestring)
+        mock_conn.sock.send.assert_called_once_with(sent_packet.bytestring)
         mock_conn.sock.recv.assert_has_calls([mock.call(receive_length)] * 2)
 
         assert callback.call_count == 1

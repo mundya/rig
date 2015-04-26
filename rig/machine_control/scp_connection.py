@@ -207,7 +207,7 @@ class SCPConnection(object):
             # If there are fewer outstanding packets than the window can take
             # then transmit a packet and add it to the list of outstanding
             # packets.
-            if len(outstanding_packets) < window_size:
+            if len(outstanding_packets) < window_size and queued_packets:
                 try:
                     args = next(parameters_and_callbacks)
                 except StopIteration:

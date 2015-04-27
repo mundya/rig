@@ -9,7 +9,8 @@ import os
 import time
 from test_scp_connection import SendReceive, mock_conn  # noqa
 
-from rig.machine_control.consts import SCPCommands, LEDAction, NNCommands, NNConstants
+from rig.machine_control.consts import (
+    SCPCommands, LEDAction, NNCommands, NNConstants)
 from rig.machine_control.machine_controller import (
     MachineController, SpiNNakerMemoryError, MemoryIO, SpiNNakerRouterError,
     SpiNNakerLoadingError, CoreInfo, ProcessorStatus,

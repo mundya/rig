@@ -5,8 +5,7 @@ python:
         - 3.3
         - 3.4
 install:
-        - if [[ $TRAVIS_PYTHON_VERSION != 3.4 ]]; then pip install -r requirements-2.7.txt; fi
-        - pip install -r requirements.txt
+        - python setup.py install
         - pip install -r requirements-test.txt
         - pip install python-coveralls
         - pip install spinnaker_proxy

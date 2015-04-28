@@ -4,9 +4,6 @@ setup(
     name="rig",
     version="0.1.2",
     packages=find_packages(),
-    package_data={'rig': ['boot/sark.struct', 'boot/scamp.boot',
-                          'binaries/*.aplx']
-                  },
 
     # Metadata for PyPi
     url="https://github.com/project-rig/rig",

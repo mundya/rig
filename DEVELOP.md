@@ -146,7 +146,8 @@ See the [Travis setup](.travis.yml) for an example of this in use.
 
 ### Test coverage checking
 
-To get a test coverage report run one of the following:
+If you're using a development install, to get a test coverage report run one of
+the following:
 
     # Summary printed on the commandline
     py.test tests --cov rig --cov tests
@@ -156,6 +157,12 @@ To get a test coverage report run one of the following:
 
 Note: The test suite should be included in coverage reporting. This has, amongst
 other things, helped find numerous tests which inadvertently never got run.
+
+If you're using a system-wide install, you must tell coverage where to find the
+Rig module's source. A simple utility is included in `utils/rig_path.py` which
+prints the path of the installed Rig library. Tests can thus be run as follows:
+
+    py.test tests --cov "$(./utils/rig_path.py)" --cov tests
 
 ### Code standards checking
 

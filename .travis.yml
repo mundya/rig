@@ -14,8 +14,16 @@ before_script:
         - export SPINNAKER_PROXY_PID=$!
 script:
         # Run the main test suite against real hardware and against the
-        # installed codebase.
-        - py.test tests/ --spinn5 --spinnaker localhost 8 8 --bmp spinn-4c.cs.man.ac.uk --cov rig --cov tests --durations=10
+        # installed codebase. Note: since we're testing an installed version,
+        # the code coverage must be checked against this version, not the one in
+        # './rig/'.
+        - >
+            py.test tests/ \
+                    --spinnaker localhost 8 8 --spinn5 \
+                    --bmp spinn-4c.cs.man.ac.uk \
+                    --cov "$(./utils/rig_path.py)" \
+                    --cov tests \
+                    --durations=10
         # Run doctests in code
         - py.test rig/
         # Run doctests in documentation

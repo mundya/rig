@@ -1752,6 +1752,42 @@ class TestMemoryIO(object):
         assert new_file._start_address == 110
         assert new_file._end_address == 110
 
+    @pytest.mark.parametrize(
+        "get_node",
+        [lambda x, y, z: x,
+         lambda x, y, z: y,
+         lambda x, y, z: z,
+         ]
+    )
+    @pytest.mark.parametrize(
+        "flush_event",
+        [lambda filelike: filelike.flush(),
+         lambda filelike: filelike.seek(0),
+         lambda filelike: filelike.read(1)]
+    )
+    def test_coalescing_writes(self, get_node, flush_event):
+        """Tests that writes from multiple slices of the same file-like view of
+        memory are buffered until some event occurs which flushes the buffer.
+        """
+        # Set up
+        cn = mock.Mock(spec_set=MachineController)
+        parent = MemoryIO(cn, 5, 6, 0, 8)
+        child_0 = parent[:4]
+        child_1 = parent[4:]
+
+        # Writes to child 0 followed by writes to child 1 should NOT result in
+        # any writes
+        child_0.seek(2)
+        child_0.write(b'\x10\x20')
+        child_1.write(b'\x30\x40')
+        assert not cn.write.called
+
+        # Performing the flush event on one of the children OR the parent
+        flush_event(get_node(parent, child_0, child_1))
+
+        # The write should have been performed
+        cn.write.assert_called_once_with(2, b'\x10\x20\x30\x40', 5, 6)
+
 
 @pytest.mark.parametrize(
     "entry, unpacked",

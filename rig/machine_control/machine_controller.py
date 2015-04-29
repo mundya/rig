@@ -1395,7 +1395,8 @@ class MemoryIO(object):
         b"Hello"
     """
 
-    def __init__(self, machine_controller, x, y, start_address, end_address):
+    def __init__(self, machine_controller, x, y, start_address, end_address,
+                 _write_buffer=None):
         """Create a file-like view onto a subset of the memory-space of a chip.
 
         Parameters
@@ -1411,6 +1412,8 @@ class MemoryIO(object):
             Starting address in memory.
         end_address : int
             End address in memory.
+        _write_buffer : :py:class:`._WriteBufferChild`
+            Internal use only, the write buffer to use to combine writes.
 
         If `start_address` is greater or equal to `end_address` then
         `end_address` is ignored and `start_address` is used instead.
@@ -1419,6 +1422,11 @@ class MemoryIO(object):
         self._x = x
         self._y = y
         self._machine_controller = machine_controller
+
+        # Get, or create, a write buffer
+        if _write_buffer is None:
+            _write_buffer = _WriteBuffer(x, y, 0, machine_controller)
+        self._write_buffer = _write_buffer
 
         # Store and clip the addresses
         self._start_address = start_address
@@ -1470,7 +1478,8 @@ class MemoryIO(object):
             # Construct the new file-like
             return type(self)(
                 self._machine_controller, self._x, self._y,
-                start_address, end_address
+                start_address, end_address,
+                _write_buffer=self._write_buffer.get_child()
             )
         else:
             raise ValueError("Can only make contiguous slices of MemoryIO")
@@ -1505,6 +1514,9 @@ class MemoryIO(object):
         :py:class:`bytes`
             Data read from SpiNNaker as a bytestring.
         """
+        # Flush this write buffer
+        self.flush()
+
         # If n_bytes is negative then calculate it as the number of bytes left
         if n_bytes < 0:
             n_bytes = self._end_address - self.address
@@ -1552,8 +1564,7 @@ class MemoryIO(object):
             bytes = bytes[:n_bytes]
 
         # Perform the write and increment the offset
-        self._machine_controller.write(
-            self.address, bytes, self._x, self._y, 0)
+        self._write_buffer.add_new_write(self.address, bytes)
         self._offset += len(bytes)
         return len(bytes)
 
@@ -1563,7 +1574,7 @@ class MemoryIO(object):
         This must be called to ensure that all writes to SpiNNaker made using
         this file-like object (and its siblings, if any) are completed.
         """
-        pass  # As there is no coalescing of writes this currently does nothing
+        self._write_buffer.flush()
 
     def tell(self):
         """Get the current offset in the memory region.
@@ -1600,6 +1611,9 @@ class MemoryIO(object):
             Note that `os.SEEK_END`, `os.SEEK_CUR` and `os.SEEK_SET` are also
             valid arguments.
         """
+        # Flush this write buffer
+        self.flush()
+
         if from_what == 0:
             self._offset = n_bytes
         elif from_what == 1:
@@ -1611,6 +1625,72 @@ class MemoryIO(object):
                 "from_what: can only take values 0 (from start), "
                 "1 (from current) or 2 (from end) not {}".format(from_what)
             )
+
+
+class _WriteBufferChild(object):
+    def __init__(self, parent):
+        self.parent = parent
+
+    def get_child(self):
+        # Return a sibling
+        return _WriteBufferChild(self.parent)
+
+    def add_new_write(self, *args, **kwargs):
+        self.parent.add_new_write(*args, **kwargs)
+
+    def flush(self):
+        self.parent.flush()
+
+
+class _WriteEntry(collections.namedtuple("_WriteEntry", "start, data")):
+    @property
+    def end(self):
+        return self.start + len(self.data)
+
+
+class _WriteBuffer(_WriteBufferChild):
+    """Write buffer used by :py:class:`.MemoryIO` to combine multiple writes
+    together.
+    """
+
+    def __init__(self, x, y, p, controller):
+        self.x = x
+        self.y = y
+        self.p = p
+        self.controller = controller
+
+        # Buffer for writes, current start and current end of write
+        self.current = None
+
+    def get_child(self):
+        # Return a child
+        return _WriteBufferChild(self)
+
+    def add_new_write(self, start_address, data):
+        """Add a new write to the buffer."""
+        if self.current is None:
+            # No value currently buffered, add this one
+            self.current = _WriteEntry(start_address, data)
+        elif start_address == self.current.end:
+            # Data is appended to the current buffer
+            self.current = _WriteEntry(
+                self.current.start, self.current.data + data)
+        elif start_address + len(data) == self.current.start:
+            # Data is prepended to the current buffer
+            self.current = _WriteEntry(
+                start_address, data + self.current.data)
+        else:
+            # Flush the buffer before storing the next write
+            self.flush()
+            self.add_new_write(start_address, data)
+
+    def flush(self):
+        """Write the current buffer out."""
+        if self.current is not None:
+            # If something is buffered then write it
+            self.controller.write(self.current.start, self.current.data,
+                                  self.x, self.y, self.p)
+            self.current = None
 
 
 def unpack_routing_table_entry(packed):

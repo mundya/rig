@@ -1577,11 +1577,10 @@ class TestMemoryIO(object):
 
     @pytest.mark.parametrize("x, y", [(4, 2), (255, 1)])
     @pytest.mark.parametrize("start_address", [0x60000004, 0x61000003])
-    @pytest.mark.parametrize("lengths", [[100, 200], [100], [300, 128, 32]])
+    @pytest.mark.parametrize("lengths", [[1, 2], [1], [3, 2, 4]])
     def test_write(self, mock_controller, x, y, start_address, lengths):
         sdram_file = MemoryIO(mock_controller, x, y,
                               start_address, start_address+500)
-        flush = sdram_file.flush = mock.Mock()
         assert sdram_file.tell() == 0
 
         # Perform the reads, check that the address is progressed
@@ -1594,8 +1593,6 @@ class TestMemoryIO(object):
             assert n_written == n_bytes
             assert sdram_file.tell() == offset + n_bytes
             assert sdram_file.address == start_address + offset + n_bytes
-
-            assert flush.called  # Assert the with block called flush
 
             calls.append(mock.call(start_address + offset,
                                    chr(i % 256) * n_bytes, x, y, 0))
@@ -1754,9 +1751,10 @@ class TestMemoryIO(object):
 
     @pytest.mark.parametrize(
         "get_node",
-        [lambda x, y, z: x,
-         lambda x, y, z: y,
-         lambda x, y, z: z,
+        [lambda w, x, y, z: w,
+         lambda w, x, y, z: x,
+         lambda w, x, y, z: y,
+         lambda w, x, y, z: z,
          ]
     )
     @pytest.mark.parametrize(
@@ -1773,20 +1771,56 @@ class TestMemoryIO(object):
         cn = mock.Mock(spec_set=MachineController)
         parent = MemoryIO(cn, 5, 6, 0, 8)
         child_0 = parent[:4]
+        child_00 = child_0[2:]
         child_1 = parent[4:]
 
         # Writes to child 0 followed by writes to child 1 should NOT result in
         # any writes
-        child_0.seek(2)
-        child_0.write(b'\x10\x20')
+        child_00.write(b'\x10\x20')
         child_1.write(b'\x30\x40')
-        assert not cn.write.called
+        assert not cn.write.called  # No write should have occurred
 
         # Performing the flush event on one of the children OR the parent
-        flush_event(get_node(parent, child_0, child_1))
+        flush_event(get_node(parent, child_0, child_00, child_1))
 
         # The write should have been performed
-        cn.write.assert_called_once_with(2, b'\x10\x20\x30\x40', 5, 6)
+        cn.write.assert_called_once_with(2, b'\x10\x20\x30\x40', 5, 6, 0)
+
+    def test_coalescing_other_order(self):
+        """Tests that writes from multiple slices of the same file-like view of
+        memory are buffered even if they occur in opposite order to memory
+        ordering.
+        """
+        # Set up
+        cn = mock.Mock(spec_set=MachineController)
+        parent = MemoryIO(cn, 9, 2, 0, 8)
+        child_0 = parent[2:4]
+        child_1 = parent[4:]
+
+        # Writes to child 1 and then child 0 should NOT result in any writes
+        child_1.write(b'\x30\x40')
+        child_0.write(b'\x12\x34')
+        assert not cn.write.called  # No write should have occurred
+
+    def test_coalescing_writes_flushes_on_non_coalesced_write(self):
+        """Tests that writes from multiple slices of the same file-like view of
+        memory are buffered until a non-contiguous write occurs.
+        """
+        # Set up
+        cn = mock.Mock(spec_set=MachineController)
+        parent = MemoryIO(cn, 9, 2, 0, 8)
+        child_0 = parent[:4]
+        child_1 = parent[4:]
+
+        # Writes to child 1 should NOT result in any writes
+        child_1.write(b'\x30\x40')
+        assert not cn.write.called  # No write should have occurred
+
+        # Writing to the start of child 0 SHOULD push the write
+        child_0.write(b'\x12\x34')
+
+        # The write should have been performed
+        cn.write.assert_called_once_with(4, b'\x30\x40', 9, 2, 0)
 
 
 @pytest.mark.parametrize(

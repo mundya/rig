@@ -300,6 +300,7 @@ class TestMachineControllerLive(object):
         with controller(x=1, y=0):
             mem = controller.sdram_alloc_as_filelike(len(data))
             assert mem.write(data) == len(data)
+            mem.flush()
             mem.seek(0)
             assert mem.read(len(data)) == data
 
@@ -1580,16 +1581,22 @@ class TestMemoryIO(object):
     def test_write(self, mock_controller, x, y, start_address, lengths):
         sdram_file = MemoryIO(mock_controller, x, y,
                               start_address, start_address+500)
+        flush = sdram_file.flush = mock.Mock()
         assert sdram_file.tell() == 0
 
         # Perform the reads, check that the address is progressed
         calls = []
         offset = 0
         for i, n_bytes in enumerate(lengths):
-            n_written = sdram_file.write(chr(i % 256) * n_bytes)
+            with sdram_file:
+                n_written = sdram_file.write(chr(i % 256) * n_bytes)
+
             assert n_written == n_bytes
             assert sdram_file.tell() == offset + n_bytes
             assert sdram_file.address == start_address + offset + n_bytes
+
+            assert flush.called  # Assert the with block called flush
+
             calls.append(mock.call(start_address + offset,
                                    chr(i % 256) * n_bytes, x, y, 0))
             offset = offset + n_bytes
@@ -1605,6 +1612,8 @@ class TestMemoryIO(object):
         assert sdram_file.write(b"\x00\x00" * 12) == 10
 
         assert sdram_file.write(b"\x00") == 0
+        sdram_file.flush()
+
         assert mock_controller.write.call_count == 1
 
     @pytest.mark.parametrize("start_address", [0x60000004, 0x61000003])

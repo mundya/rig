@@ -195,12 +195,34 @@ constrained to the allocated region. ::
     >>> block.read(13)
     b"Hello, world!"
 
+.. warning::
+    Writes are buffered before being transmitted to the SpiNNaker board.
+    :py:meth:`~.rig.machine_control.machine_controller.MemoryIO.flush` must be
+    called to force writes on a given file-like (and its siblings -- see below)
+    to be completed.
+
+    In addition, a context manager exists which may be used to ensure that
+    flushes are always performed, for example::
+
+        >>> with block:
+        >>>     block.seek(0)
+        >>>     block.write("Hello")
+
+    Is equivalent to::
+
+        >>> block.seek(0)
+        >>> block.write("Hello")
+        >>> block.flush()
+
 These blocks can also be sliced to allow a single allocation to be safely
 divided between different parts of the application::
 
     >>> hello = block[0:5]
     >>> hello.read()
     b"Hello"
+
+Slices of the same memory file-like are considered to be siblings and flushing
+one of them will result in flushing of the write buffer for all siblings.
 
 The :py:func:`~rig.machine_control.utils.sdram_alloc_for_vertices` utility
 function is provided to allocate multiple SDRAM blocks simultaneously.  This

@@ -1479,6 +1479,15 @@ class MemoryIO(object):
         """Return the number of bytes in the file-like view of SDRAM."""
         return self._end_address - self._start_address
 
+    def __enter__(self):
+        """Enter a new block which will call :py:meth:`~.flush` when exited."""
+        return self
+
+    def __exit__(self, exception_type, exception_value, traceback):
+        """Exit a block and call :py:meth:`~.flush`."""
+        # We don't handle the exception, but we will call flush
+        self.flush()
+
     def read(self, n_bytes=-1):
         """Read a number of bytes from the memory.
 
@@ -1516,6 +1525,11 @@ class MemoryIO(object):
     def write(self, bytes):
         """Write data to the memory.
 
+        .. warning::
+            Writes are buffered before being written to the machine.
+            :py:meth:`~.flush` must be called to ensure that all writes are
+            completed.
+
         .. note::
             Writes beyond the specified memory range will be truncated.
 
@@ -1542,6 +1556,14 @@ class MemoryIO(object):
             self.address, bytes, self._x, self._y, 0)
         self._offset += len(bytes)
         return len(bytes)
+
+    def flush(self):
+        """Flush any buffered writes.
+
+        This must be called to ensure that all writes to SpiNNaker made using
+        this file-like object (and its siblings, if any) are completed.
+        """
+        pass  # As there is no coalescing of writes this currently does nothing
 
     def tell(self):
         """Get the current offset in the memory region.

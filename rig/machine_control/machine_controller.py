@@ -1479,7 +1479,7 @@ class MemoryIO(object):
             return type(self)(
                 self._machine_controller, self._x, self._y,
                 start_address, end_address,
-                _write_buffer=self._write_buffer.get_child()
+                _write_buffer=self._write_buffer
             )
         else:
             raise ValueError("Can only make contiguous slices of MemoryIO")
@@ -1627,28 +1627,7 @@ class MemoryIO(object):
             )
 
 
-class _WriteBufferChild(object):
-    def __init__(self, parent):
-        self.parent = parent
-
-    def get_child(self):
-        # Return a sibling
-        return _WriteBufferChild(self.parent)
-
-    def add_new_write(self, *args, **kwargs):
-        self.parent.add_new_write(*args, **kwargs)
-
-    def flush(self):
-        self.parent.flush()
-
-
-class _WriteEntry(collections.namedtuple("_WriteEntry", "start, data")):
-    @property
-    def end(self):
-        return self.start + len(self.data)
-
-
-class _WriteBuffer(_WriteBufferChild):
+class _WriteBuffer(object):
     """Write buffer used by :py:class:`.MemoryIO` to combine multiple writes
     together.
     """
@@ -1659,26 +1638,27 @@ class _WriteBuffer(_WriteBufferChild):
         self.p = p
         self.controller = controller
 
-        # Buffer for writes, current start and current end of write
-        self.current = None
+        # A buffer of writes
+        self.buffer = None
+        self.start_address = None
 
-    def get_child(self):
-        # Return a child
-        return _WriteBufferChild(self)
+    @property
+    def end_address(self):
+        return self.start_address + len(self.buffer)
 
     def add_new_write(self, start_address, data):
         """Add a new write to the buffer."""
-        if self.current is None:
+        if self.buffer is None:
             # No value currently buffered, add this one
-            self.current = _WriteEntry(start_address, data)
-        elif start_address == self.current.end:
+            self.buffer = data
+            self.start_address = start_address
+        elif start_address == self.end_address:
             # Data is appended to the current buffer
-            self.current = _WriteEntry(
-                self.current.start, self.current.data + data)
-        elif start_address + len(data) == self.current.start:
+            self.buffer += data
+        elif start_address + len(data) == self.start_address:
             # Data is prepended to the current buffer
-            self.current = _WriteEntry(
-                start_address, data + self.current.data)
+            self.buffer = data + self.buffer
+            self.start_address = start_address
         else:
             # Flush the buffer before storing the next write
             self.flush()
@@ -1686,11 +1666,12 @@ class _WriteBuffer(_WriteBufferChild):
 
     def flush(self):
         """Write the current buffer out."""
-        if self.current is not None:
+        if self.buffer is not None:
             # If something is buffered then write it
-            self.controller.write(self.current.start, self.current.data,
+            self.controller.write(self.start_address, self.buffer,
                                   self.x, self.y, self.p)
-            self.current = None
+            self.buffer = None
+            self.start_address = None
 
 
 def unpack_routing_table_entry(packed):

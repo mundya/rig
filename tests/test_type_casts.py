@@ -199,6 +199,17 @@ class TestNumpyFloatToFixConverter(object):
                         *[ftf(v) for v in values])
         )
 
+    def test_shape_is_retained(self):
+        # Format
+        fpf = NumpyFloatToFixConverter(True, 32, 15)
+
+        # Create the input matrix
+        matrix = np.array([[1.0]])
+
+        # Convert, ensure that the shape is the same
+        fixed = fpf(matrix)
+        assert fixed.shape == matrix.shape
+
 
 class TestNumpyFixToFloat(object):
     @pytest.mark.parametrize(

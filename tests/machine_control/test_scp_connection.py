@@ -43,6 +43,11 @@ def mock_conn():
     return conn
 
 
+def test_close(mock_conn):
+    mock_conn.close()
+    assert mock_conn.sock.close.called
+
+
 def test_scpcall():
     """scpcall is a utility for specifying SCP packets and callbacks"""
     call = scpcall(0, 1, 2, 3)
@@ -441,6 +446,7 @@ class TestBursts(object):
             mock_conn.send_scp_burst(512, 8, packets)
 
 
+@pytest.mark.parametrize("readinto", [True, False])
 @pytest.mark.parametrize(
     "buffer_size, window_size, x, y, p", [(128, 1, 0, 0, 1), (256, 5, 1, 2, 3)]
 )
@@ -464,7 +470,7 @@ class TestBursts(object):
      (256, DataType.word, 0x60000004)
      ])
 def test_read(buffer_size, window_size, x, y, p, n_bytes,
-              data_type, start_address):
+              data_type, start_address, readinto):
     mock_conn = SCPConnection("localhost")
 
     # Construct the expected calls, and hence the expected return packets
@@ -505,8 +511,13 @@ def test_read(buffer_size, window_size, x, y, p, n_bytes,
         send_scp_burst.side_effect = ccs
 
         # Read an amount of memory specified by the size.
-        data = mock_conn.read(buffer_size, window_size, x, y, p,
-                              start_address, n_bytes)
+        if readinto:
+            data = bytearray(n_bytes)
+            mock_conn.readinto(data, buffer_size, window_size, x, y, p,
+                               start_address, n_bytes)
+        else:
+            data = mock_conn.read(buffer_size, window_size, x, y, p,
+                                  start_address, n_bytes)
         assert data == ccs.read_data
 
     # send_burst_scp should have been called once, each element in the iterator

@@ -18,7 +18,7 @@ from rig.machine_control.machine_controller import (
 )
 from rig.machine_control.packets import SCPPacket
 from rig.machine_control.scp_connection import \
-    SCPConnection, FatalReturnCodeError
+    SCPConnection, SCPError, FatalReturnCodeError
 from rig.machine_control import regions, consts, struct_file
 
 from rig.machine import Cores, SDRAM, SRAM, Links, Machine
@@ -99,6 +99,17 @@ class TestMachineControllerLive(object):
                 assert sver.version >= 1.3
                 assert sver.position == (x, y)
 
+    def test_get_ip_address(self, controller):
+        """Test getting the IP address."""
+        # Chip 0, 0 should report an IP address (since it is what we're
+        # connected via, though note that we can't check the IP since we may be
+        # connected via a proxy).
+        assert isinstance(controller.get_ip_address(0, 0), str)
+
+        # Chip 1, 1 should not report an IP address (since in no existing
+        # hardware does it have an Ethernet connection)..
+        assert controller.get_ip_address(1, 1) is None
+
     def test_write_and_read(self, controller):
         """Test write and read capabilities by writing a string to SDRAM and
         then reading back in a different order.
@@ -138,7 +149,7 @@ class TestMachineControllerLive(object):
     def test_set_get_clear_iptag(self, controller):
         # Get our address, then add a new IPTag pointing
         # **YUCK**
-        ip_addr = controller.connections[0].sock.getsockname()[0]
+        ip_addr = controller.connections[None].sock.getsockname()[0]
         port = 1234
         iptag = 7
 
@@ -480,6 +491,95 @@ class TestMachineController(object):
         assert sver.build_date == 888999
         assert sver.version_string == "Hello, World!"
 
+    @pytest.mark.parametrize("has_ip", [True, False])
+    def test_get_ip_address(self, has_ip):
+        cn = MachineController("localhost")
+        cn.read_struct_field = mock.Mock(side_effect=[has_ip, 0x11223344])
+
+        ip = cn.get_ip_address(1, 2)
+
+        if has_ip:
+            assert ip == "68.51.34.17"
+            cn.read_struct_field.assert_has_calls([
+                mock.call("sv", "eth_up", x=1, y=2),
+                mock.call("sv", "ip_addr", x=1, y=2),
+            ])
+        else:
+            assert ip is None
+            cn.read_struct_field.assert_called_once_with("sv", "eth_up",
+                                                         x=1, y=2)
+
+    def test__get_connection(self):
+        cn = MachineController("localhost")
+        cn.connections = {
+            None: "default",
+            (0, 0): "0,0",
+            (4, 8): "4,8",
+            # 8, 4 is missing!
+        }
+
+        # Until _width and _height are set, the default should be used at all
+        # times.
+        assert cn._get_connection(0, 0) == "default"
+        assert cn._get_connection(1, 0) == "default"
+        assert cn._get_connection(0, 1) == "default"
+        assert cn._get_connection(11, 0) == "default"
+        assert cn._get_connection(0, 11) == "default"
+
+        # With width and height specified, the local connector should be used
+        # in all cases when possible
+        cn._width = 12
+        cn._height = 12
+
+        assert cn._get_connection(0, 0) == "0,0"
+        assert cn._get_connection(1, 0) == "0,0"
+        assert cn._get_connection(0, 1) == "0,0"
+
+        assert cn._get_connection(4, 8) == "4,8"
+        assert cn._get_connection(5, 8) == "4,8"
+        assert cn._get_connection(4, 9) == "4,8"
+
+        # When a missing a connection, another connection should be used
+        assert cn._get_connection(8, 4) in ("default", "0,0", "4,8")
+        assert cn._get_connection(9, 4) in ("default", "0,0", "4,8")
+        assert cn._get_connection(8, 5) in ("default", "0,0", "4,8")
+
+    def test_discover_connections(self):
+        # In this test, the discovered system is a 6-board system with the
+        # board with a dead chip on (16, 8), the Ethernet link at (4, 8) being
+        # down, the connection to (8, 4) resulting in timeouts and the
+        # connection to (20, 4) already present.
+        cn = MachineController("localhost")
+        w, h = 24, 12
+        cn.get_p2p_routing_table = mock.Mock(return_value={
+            (x, y): (consts.P2PTableEntry.north
+                     if (x, y) != (16, 8) else
+                     consts.P2PTableEntry.none)
+            for x in range(w)
+            for y in range(h)
+        })
+
+        def get_ip_address(x, y):
+            if (x, y) == (4, 8):
+                return None
+            else:
+                return "127.0.0.1"
+        cn.get_ip_address = mock.Mock(side_effect=get_ip_address)
+
+        def get_software_version(x, y):
+            if (x, y) == (8, 4):
+                raise SCPError("Fail.")
+        cn.get_software_version = mock.Mock(side_effect=get_software_version)
+
+        cn.connections[(20, 4)] = mock.Mock()
+
+        assert cn.discover_connections() == 2
+        assert cn._width == w
+        assert cn._height == h
+        assert set(cn.connections) == set([None, (0, 0), (12, 0), (20, 4)])
+        assert isinstance(cn.connections[(0, 0)], SCPConnection)
+        assert isinstance(cn.connections[(12, 0)], SCPConnection)
+
     @pytest.mark.parametrize("size", [128, 256])
     def test_scp_data_length(self, size):
         cn = MachineController("localhost")
@@ -503,13 +603,13 @@ class TestMachineController(object):
         cn = MachineController("localhost")
         cn._scp_data_length = buffer_size
         cn._window_size = window_size
-        cn.connections[0] = mock.Mock(spec_set=SCPConnection)
+        cn.connections[None] = mock.Mock(spec_set=SCPConnection)
 
         # Perform the read and ensure that values are passed on as appropriate
         with cn(x=x, y=y, p=p):
             cn.write(start_address, data)
 
-        cn.connections[0].write.assert_called_once_with(
+        cn.connections[None].write.assert_called_once_with(
             buffer_size, window_size, x, y, p, start_address, data
         )
 
@@ -525,16 +625,44 @@ class TestMachineController(object):
         cn = MachineController("localhost")
         cn._scp_data_length = buffer_size
         cn._window_size = window_size
-        cn.connections[0] = mock.Mock(spec_set=SCPConnection)
-        cn.connections[0].read.return_value = data
+        cn.connections[None] = mock.Mock(spec_set=SCPConnection)
+        cn.connections[None].read.return_value = data
 
         # Perform the read and ensure that values are passed on as appropriate
         with cn(x=x, y=y, p=p):
             assert data == cn.read(start_address, length)
 
-        cn.connections[0].read.assert_called_once_with(
+        cn.connections[None].read.assert_called_once_with(
             buffer_size, window_size, x, y, p, start_address, length
         )
+
+    @pytest.mark.parametrize(
+        "buffer_size, window_size, x, y, p, start_address, length, data",
+        [(128, 1, 0, 1, 2, 0x67800000, 100, b"\x00" * 100),
+         (256, 5, 1, 4, 5, 0x67801000, 2, b"\x10\x23"),
+         ]
+    )
+    def test_readinto(self, buffer_size, window_size, x, y, p,
+                      start_address, length, data):
+        # Create the mock controller
+        cn = MachineController("localhost")
+        cn._scp_data_length = buffer_size
+        cn._window_size = window_size
+        cn.connections[None] = mock.Mock(spec_set=SCPConnection)
+
+        def mock_readinto(buffer, *args, **kwargs):
+            buffer[:] = data
+        cn.connections[None].readinto.side_effect = mock_readinto
+
+        # Perform the read and ensure that values are passed on as appropriate
+        with cn(x=x, y=y, p=p):
+            read_data = bytearray(length)
+            cn.readinto(start_address, read_data, length)
+            assert data == read_data
+
+        assert len(cn.connections[None].readinto.mock_calls) == 1
+        assert cn.connections[None].readinto.mock_calls[0][1][1:] == \
+            (buffer_size, window_size, x, y, p, start_address, length)
 
     @pytest.mark.parametrize(
         "iptag, addr, port",
@@ -1865,15 +1993,17 @@ class TestMemoryIO(object):
         calls = []
         offset = 0
         for n_bytes in lengths:
-            sdram_file.read(n_bytes)
+            buf = bytearray(n_bytes)
+            sdram_file.readinto(buf, n_bytes)
             assert sdram_file.tell() == offset + n_bytes
             assert sdram_file.address == start_address + offset + n_bytes
-            calls.append(mock.call(start_address + offset, n_bytes, x, y, 0))
+            calls.append(mock.call(start_address + offset,
+                                   buf, n_bytes, x, y, 0))
             offset = offset + n_bytes
 
         # Check the reads caused the appropriate calls to the machine
         # controller.
-        mock_controller.read.assert_has_calls(calls)
+        mock_controller.readinto.assert_has_calls(calls)
 
     @pytest.mark.parametrize("x, y", [(1, 3), (3, 0)])
     @pytest.mark.parametrize("start_address, length, offset",
@@ -1885,18 +2015,15 @@ class TestMemoryIO(object):
 
         # Assert that reading with no parameter reads the full number of bytes
         sdram_file.seek(offset)
-        sdram_file.read()
-        mock_controller.read.assert_called_one_with(
-            start_address + offset, length - offset, x, y, 0)
+        assert sdram_file._read_n_bytes(-1) == length - offset
 
     def test_read_beyond(self, mock_controller):
         sdram_file = MemoryIO(mock_controller, 0, 0,
                               start_address=0, end_address=10)
-        sdram_file.read(100)
-        mock_controller.read.assert_called_with(0, 10, 0, 0, 0)
+        assert len(sdram_file.read(100)) == 10
 
         assert sdram_file.read(1) == b''
-        assert mock_controller.read.call_count == 1
+        assert mock_controller.readinto.call_count == 1
 
     @pytest.mark.parametrize("x, y", [(4, 2), (255, 1)])
     @pytest.mark.parametrize("start_address", [0x60000004, 0x61000003])
@@ -2114,6 +2241,7 @@ class TestMemoryIO(object):
         "flush_event",
         [lambda filelike: filelike.flush(),
          lambda filelike: filelike.read(1),
+         lambda filelike: filelike.readinto(bytearray(1), 1),
          lambda filelike: filelike.close()]
     )
     def test_coalescing_writes(self, get_node, flush_event):

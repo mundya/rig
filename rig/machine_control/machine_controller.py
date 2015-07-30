@@ -12,7 +12,7 @@ import pkg_resources
 
 from .consts import SCPCommands, NNCommands, NNConstants, AppFlags, LEDAction
 from . import boot, consts, regions, struct_file
-from .scp_connection import SCPConnection
+from .scp_connection import SCPConnection, scpcall
 
 from rig.machine_control.scp_connection import SCPError
 
@@ -743,26 +743,35 @@ class MachineController(ContextMixin):
 
     def _send_ffd(self, pid, aplx_data, address):
         """Send flood-fill data packets."""
-        block = 0
-        pos = 0
         aplx_size = len(aplx_data)
 
-        while pos < aplx_size:
-            # Get the next block of data, send and progress the block
-            # counter and the address
-            data = aplx_data[pos:pos + self.scp_data_length]
-            data_size = len(data)
-            size = data_size // 4 - 1
-
+        def send_ffd(address):
+            # Precompute arg1
             arg1 = (NNConstants.forward << 24 | NNConstants.retry << 16 | pid)
-            arg2 = (block << 16) | (size << 8)
-            self._send_scp(0, 0, 0, SCPCommands.flood_fill_data,
-                           arg1, arg2, address, data)
 
-            # Increment the address and the block counter
-            block += 1
-            address += data_size
-            pos += data_size
+            # Store the current block number and offset
+            block = 0
+            pos = 0
+            while pos < aplx_size:
+                # Get the next block of data, send and progress the block
+                # counter and the address
+                data = aplx_data[pos:pos + self.scp_data_length]
+                data_size = len(data)
+                size = data_size // 4 - 1
+
+                arg2 = (block << 16) | (size << 8)
+                yield scpcall(0, 0, 0, SCPCommands.flood_fill_data,
+                              arg1, arg2, address, data)
+
+                # Increment the address and the block counter
+                block += 1
+                address += data_size
+                pos += data_size
+
+        # Transmit the data packets as a burst of SCP
+        self._get_connection(0, 0).send_scp_burst(self.scp_data_length,
+                                                  self.scp_window_size,
+                                                  send_ffd(address))
 
     def _send_ffe(self, pid, app_id, app_flags, cores, fr):
         """Send a flood-fill end packet."""

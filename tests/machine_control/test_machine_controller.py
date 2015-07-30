@@ -1061,7 +1061,9 @@ class TestMachineController(object):
         """Test loading a single APLX to a set of cores."""
         BASE_ADDRESS = 0x68900000
         # Create the mock controller
+        scp_conn = mock.Mock()
         cn._send_scp = mock.Mock()
+        cn._get_connection = mock.Mock(return_value=scp_conn)
         cn.read_struct_field = mock.Mock()
         cn.read_struct_field.return_value = BASE_ADDRESS
 
@@ -1092,7 +1094,7 @@ class TestMachineController(object):
 
         # Assert that the transmitted packets were sensible, do this by
         # decoding each call to send_scp.
-        assert cn._send_scp.call_count == n_blocks + 2
+        assert cn._send_scp.call_count == 2
         # Flood-fill start
         (x, y, p, cmd, arg1, arg2, arg3) = cn._send_scp.call_args_list[0][0]
         assert x == y == p == 0
@@ -1109,15 +1111,16 @@ class TestMachineController(object):
         assert arg3 & 0x000000ff == NNConstants.retry
 
         # Flood fill data
+        assert scp_conn.send_scp_burst.called
+        burst_packets = scp_conn.send_scp_burst.call_args[0][2]
         address = BASE_ADDRESS
-        for n in range(0, n_blocks):
+        for n, call in zip(range(0, n_blocks), burst_packets):
             # Get the next block of data
             (block_data, aplx_data) = (aplx_data[:cn._scp_data_length],
                                        aplx_data[cn._scp_data_length:])
 
             # Check the sent SCP packet
-            (x_, y_, p_, cmd, arg1, arg2, arg3, data) = \
-                cn._send_scp.call_args_list[n+1][0]
+            (x_, y_, p_, cmd, arg1, arg2, arg3, data, _, _) = call
 
             # Assert the x, y and p are the same
             assert x_ == x and y_ == y and p_ == p

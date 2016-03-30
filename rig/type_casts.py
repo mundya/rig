@@ -1,6 +1,21 @@
 """Fixed point conversion utilities.
 """
 import numpy as np
+import warnings
+
+
+class SaturationWarning(RuntimeWarning):
+    """Warning produced when values are saturated when converting to
+    fixed-point format.
+
+    Attributes
+    ----------
+    values : array
+        Values which caused the saturation.
+    """
+    def __init__(self, values):
+        super(SaturationWarning, self).__init__()
+        self.values = values
 
 
 def float_to_fix(signed, n_bits, n_frac):
@@ -15,7 +30,8 @@ def float_to_fix(signed, n_bits, n_frac):
         >>> hex(s34(0.5))
         '0x8'
 
-    The fixed point conversion is saturating::
+    The conversion is saturating, a warning (:py:class:`~.SaturationWarning`)
+    will be made if saturation occurs::
 
         >>> q34 = float_to_fix(False, 8, 4)  # Unsigned 4.4
         >>> hex(q34(-0.5))
@@ -72,6 +88,10 @@ def float_to_fix(signed, n_bits, n_frac):
         value : float
             The value to convert.
         """
+        if value < min_v or value > max_v:
+            # Raise a warning if saturation occurs
+            warnings.warn(SaturationWarning(value), stacklevel=2)
+
         value = np.clip(value, min_v, max_v)
 
         if value < 0:
@@ -171,7 +191,8 @@ class NumpyFloatToFixConverter(object):
         >>> f(vals)
         array([ 0,  4,  8, -8, -4], dtype=int8)
 
-    The conversion is saturating::
+    The conversion is saturating, a warning (:py:class:`~.SaturationWarning`)
+    will be made if saturation occurs::
 
         >>> f(np.array([15.0, 16.0, -16.0, -17.0]))
         array([ 127,  127, -128, -128], dtype=int8)
@@ -233,6 +254,12 @@ class NumpyFloatToFixConverter(object):
 
     def __call__(self, values):
         """Convert the given NumPy array of values into fixed point format."""
+        # Determine which, if any, values will be saturated
+        clipped = (values < self.min_value) | (values > self.max_value)
+        if np.any(clipped):
+            # Raise a warning
+            warnings.warn(SaturationWarning(values[clipped]), stacklevel=2)
+
         # Saturate the values
         vals = np.clip(values, self.min_value, self.max_value)
 

@@ -2,9 +2,11 @@ import numpy as np
 import pytest
 from rig.type_casts import (
     float_to_fix, fix_to_float,
-    NumpyFloatToFixConverter, NumpyFixToFloatConverter
+    NumpyFloatToFixConverter, NumpyFixToFloatConverter,
+    SaturationWarning
 )
 import struct
+import warnings
 
 
 class TestFloatToFix(object):
@@ -73,7 +75,15 @@ class TestFloatToFix(object):
          (2**4 - 1 + sum(2**-n for n in range(1, 6)), 8, 4, 0xff),  # Saturate
          ])
     def test_saturate_unsigned(self, value, n_bits, n_frac, output):
-        assert float_to_fix(False, n_bits, n_frac)(value) == output
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            assert float_to_fix(False, n_bits, n_frac)(value) == output
+
+            # Should be flagged as saturated
+            assert len(w) == 1
+            assert issubclass(w[0].category, SaturationWarning)
+            assert __file__ == w[0].filename  # Stack should refer here!
 
 
 class TestFixToFloat(object):
@@ -185,9 +195,17 @@ class TestNumpyFloatToFixConverter(object):
         values = [2.0**(n_bits - n_frac - (1 if signed else 0)),
                   2.0**(n_bits - n_frac - (1 if signed else 0)) - 1]
 
-        # Format
-        fpf = NumpyFloatToFixConverter(signed, n_bits, n_frac)
-        vals = fpf(np.array(values))
+        # Format, should raise a warning
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            fpf = NumpyFloatToFixConverter(signed, n_bits, n_frac)
+            vals = fpf(np.array(values))
+
+            # Should be flagged as saturated
+            assert len(w) == 1
+            assert issubclass(w[0].category, SaturationWarning)
+            assert __file__ == w[0].filename  # Stack should refer here!
 
         c = {8: 'B', 16: 'H', 32: 'I'}[n_bits]
 

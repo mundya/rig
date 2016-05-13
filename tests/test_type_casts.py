@@ -12,7 +12,7 @@ class TestFloatToFix(object):
     """
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-         (False, -1, 3),
+        [(False, -1, 3),
          (False, 32, -1),  # Negative
          ])
     def test_invalid_parameters(self, signed, n_bits, n_frac):
@@ -78,9 +78,7 @@ class TestFloatToFix(object):
 class TestFixToFloat(object):
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-        [(True, 32, 32),  # Too many frac bits
-         (False, 32, 33),
-         (False, -1, 3),
+        [(False, -1, 3),
          (False, 32, -1),  # Negative
          ])
     def test_invalid_parameters(self, signed, n_bits, n_frac):
@@ -101,9 +99,7 @@ class TestFixToFloat(object):
 class TestNumpyFloatToFixConverter(object):
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-        [(True, 32, 32),  # Too many frac bits
-         (False, 32, 33),
-         (False, 32, -1),
+        [(False, 32, -1),
          (False, -1, 1),
          (False, 31, 30),  # Weird number of bits
          ])

@@ -305,7 +305,7 @@ def validate_fp_params(signed, n_bits, n_frac):
     n_int = n_bits if not signed else n_bits - 1
 
     # Return the min and max values
-    min_v = 0 if not signed else -(1 << (n_int - n_frac))
+    min_v = 0 if not signed else -(2 ** (n_int - n_frac))
     max_v = ((1 << n_int) - 1) / float(1 << n_frac)
 
     return min_v, max_v

@@ -12,9 +12,7 @@ class TestFloatToFix(object):
     """
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-        [(True, 32, 32),  # Too many frac bits
-         (False, 32, 33),
-         (False, -1, 3),
+        [(False, -1, 3),
          (False, 32, -1),  # Negative
          ])
     def test_invalid_parameters(self, signed, n_bits, n_frac):
@@ -23,15 +21,16 @@ class TestFloatToFix(object):
 
     @pytest.mark.parametrize(
         "value, n_bits, n_frac, output",
-        [(0.50, 8, 4, 0x08),
-         (0.50, 8, 5, 0x10),
-         (0.50, 8, 6, 0x20),
-         (0.50, 8, 7, 0x40),
-         (0.50, 8, 8, 0x80),
-         (0.25, 8, 4, 0x04),
-         (0.75, 8, 4, 0x0c),
-         (1.75, 8, 4, 0x1c),
-         (-1.75, 8, 4, 0x00),  # Clipped
+        [(0.50,         8, 4, 0x08),
+         (0.50,         8, 5, 0x10),
+         (0.50,         8, 6, 0x20),
+         (0.50,         8, 7, 0x40),
+         (0.50,         8, 8, 0x80),
+         (0.25,         8, 4, 0x04),
+         (0.75,         8, 4, 0x0c),
+         (1.75,         8, 4, 0x1c),
+         (1.0 / 512.0,  8, 9, 1),
+         (-1.75,        8, 4, 0x00),  # Clipped
          ])
     def test_no_saturate_unsigned(self, value, n_bits, n_frac, output):
         assert float_to_fix(False, n_bits, n_frac)(value) == output
@@ -79,9 +78,7 @@ class TestFloatToFix(object):
 class TestFixToFloat(object):
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-        [(True, 32, 32),  # Too many frac bits
-         (False, 32, 33),
-         (False, -1, 3),
+        [(False, -1, 3),
          (False, 32, -1),  # Negative
          ])
     def test_invalid_parameters(self, signed, n_bits, n_frac):
@@ -102,9 +99,7 @@ class TestFixToFloat(object):
 class TestNumpyFloatToFixConverter(object):
     @pytest.mark.parametrize(
         "signed, n_bits, n_frac",
-        [(True, 32, 32),  # Too many frac bits
-         (False, 32, 33),
-         (False, 32, -1),
+        [(False, 32, -1),
          (False, -1, 1),
          (False, 31, 30),  # Weird number of bits
          ])

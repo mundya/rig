@@ -298,17 +298,14 @@ def validate_fp_params(signed, n_bits, n_frac):
 
     # Check the number of bits is possible
     signed_bit = 1 if signed else 0
-    if signed_bit + n_frac > n_bits or n_frac < 0:
-        raise ValueError(
-            "n_frac: {}: Must be less than {} (and positive).".format(
-                n_frac, n_bits - signed_bit)
-        )
+    if n_frac < 0:
+        raise ValueError("n_frac: {}: Must be positive.".format(n_frac))
 
     # Account for the sign bit
     n_int = n_bits if not signed else n_bits - 1
 
     # Return the min and max values
-    min_v = 0 if not signed else -(1 << (n_int - n_frac))
+    min_v = 0 if not signed else -(2 ** (n_int - n_frac))
     max_v = ((1 << n_int) - 1) / float(1 << n_frac)
 
     return min_v, max_v
